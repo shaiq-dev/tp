@@ -1,2 +1,6 @@
 /tp
 /dist/
+
+# Never commit signing keys. install.sh carries the public key inline.
+*.key
+*.pub

@@ -12,7 +12,7 @@ set -eu
 REPO="${TP_REPO:-shaiq-dev/tp}"
 PREFIX="${TP_PREFIX:-$HOME/.local}"
 PUBKEY="untrusted comment: minisign public key
-RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLnL1eEZFrn"
+RWQZqgh7RiD98s4R6KmvhFfM+sTf/7IQIHSX5Zzj1dGNh+dJKQ3hrBmR"
 
 if [ -n "${TP_VERSION:-}" ]; then
   BASE="https://github.com/$REPO/releases/download/$TP_VERSION"
