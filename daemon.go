@@ -624,7 +624,7 @@ func xdgDir(env string, fallback ...string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return dir, os.MkdirAll(dir, 0o700) //nolint:gosec // dir comes from the user's own XDG environment.
+	return dir, os.MkdirAll(dir, 0o700)
 }
 
 // xdgPath is xdgDir without the side effect, for code that wants to know where

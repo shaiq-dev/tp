@@ -19,7 +19,13 @@ import (
 // terminal has no app to attribute to and is denied without a prompt. A launch
 // agent has an identity of its own, which is why the installer prefers one.
 
-const osReleasePath = "/proc/sys/kernel/osrelease"
+const (
+	osReleasePath = "/proc/sys/kernel/osrelease"
+
+	// osDarwin is compared against runtime.GOOS often enough that goconst asks
+	// for a name.
+	osDarwin = "darwin"
+)
 
 // wslNATRange is the range the WSL virtual switch hands out in NAT mode.
 var wslNATRange = net.IPNet{IP: net.IPv4(172, 16, 0, 0), Mask: net.CIDRMask(12, 32)}
@@ -69,7 +75,7 @@ func launchAgentPath() string {
 }
 
 func launchAgentInstalled() bool {
-	if runtime.GOOS != "darwin" {
+	if runtime.GOOS != osDarwin {
 		return false
 	}
 	p := launchAgentPath()
@@ -95,14 +101,14 @@ func discoveryAdvice() []string {
 			"  3. if inbound still fails, in an admin PowerShell:",
 			"       Set-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -DefaultInboundAction Allow",
 		}
-	case runtime.GOOS == "darwin" && !launchAgentInstalled():
+	case runtime.GOOS == osDarwin && !launchAgentInstalled():
 		return []string{
 			"macOS 15 and later records local network access per code signing identity,",
 			"and the Go linker signs every binary as a.out, so there is nothing to grant.",
 			"Sign the daemon as sh.tp.daemon and run it under launchd:",
 			"  tp doctor --fix",
 		}
-	case runtime.GOOS == "darwin":
+	case runtime.GOOS == osDarwin:
 		return []string{
 			"The daemon is installed and signed, so the decision is yours to make:",
 			"  System Settings, Privacy and Security, Local Network, enable tp",

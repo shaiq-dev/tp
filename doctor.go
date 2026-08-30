@@ -53,7 +53,7 @@ func cmdDoctor(ctx context.Context, args []string) error {
 		fmt.Printf("  %s  %s  %s\n", p.HostID, p.Hostname, p.Addr)
 	}
 
-	if runtime.GOOS == "darwin" {
+	if runtime.GOOS == osDarwin {
 		state := "not installed"
 		if launchAgentInstalled() {
 			state = launchAgentPath()
@@ -89,7 +89,7 @@ func cmdDoctor(ctx context.Context, args []string) error {
 // Only macOS has one: signing the daemon so the local network gate has an
 // identity to record. Everything else is a Windows setting or a router.
 func doctorFix(ctx context.Context, quiet bool) error {
-	if runtime.GOOS != "darwin" {
+	if runtime.GOOS != osDarwin {
 		if !quiet {
 			for _, line := range discoveryAdvice() {
 				fmt.Println(line)
@@ -121,19 +121,21 @@ func installAgent(ctx context.Context) error {
 	if path == "" {
 		return errors.New("cannot find your home directory")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, []byte(agentPlist(app)), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(agentPlist(app)), 0o600); err != nil {
 		return err
 	}
 
 	// Replacing an older agent, so the previous one goes first and a failure
 	// there is not fatal.
+	//nolint:gosec // Every argument is a constant or a path we just built.
 	_ = exec.CommandContext(ctx, "launchctl", "bootout", gui()+"/sh.tp.daemon").Run()
 	_ = exec.CommandContext(ctx, "pkill", "-f", "tp daemon").Run()
+	//nolint:gosec // Every argument is a constant or a path we just built.
 	if out, err := exec.CommandContext(ctx, "launchctl", "bootstrap", gui(), path).CombinedOutput(); err != nil {
-		return fmt.Errorf("launchctl bootstrap: %v: %s", err, out)
+		return fmt.Errorf("launchctl bootstrap: %w: %s", err, out)
 	}
 
 	fmt.Printf("installed %s\n", path)
@@ -159,11 +161,11 @@ func installBundle(ctx context.Context, bin string) (string, error) {
 	}
 	app := filepath.Join(home, "Library", "Application Support", "tp", "tp.app")
 	macos := filepath.Join(app, "Contents", "MacOS")
-	if err := os.MkdirAll(macos, 0o755); err != nil {
+	if err := os.MkdirAll(macos, 0o750); err != nil {
 		return "", err
 	}
 
-	src, err := os.ReadFile(bin)
+	src, err := os.ReadFile(bin) //nolint:gosec // bin is os.Executable.
 	if err != nil {
 		return "", err
 	}
@@ -171,13 +173,14 @@ func installBundle(ctx context.Context, bin string) (string, error) {
 	// Written aside and renamed: the running daemon may be this very file, and
 	// truncating a mapped executable kills it.
 	tmp := exe + ".new"
-	if err := os.WriteFile(tmp, src, 0o755); err != nil {
+	//nolint:gosec // 0o700 is owner only, and the daemon has to be executable.
+	if err := os.WriteFile(tmp, src, 0o700); err != nil {
 		return "", err
 	}
 	if err := os.Rename(tmp, exe); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(filepath.Join(app, "Contents", "Info.plist"), []byte(infoPlist()), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(app, "Contents", "Info.plist"), []byte(infoPlist()), 0o600); err != nil {
 		return "", err
 	}
 
@@ -186,10 +189,11 @@ func installBundle(ctx context.Context, bin string) (string, error) {
 			"identifier a.out and macOS cannot grant it local network access. "+
 			"Install the Xcode command line tools and run tp install-agent again: %w", err)
 	}
+	//nolint:gosec // The identifier is a constant and app is a path we just built.
 	out, err := exec.CommandContext(ctx, "codesign", "--force", "--sign", "-",
 		"--identifier", bundleID, app).CombinedOutput()
 	if err != nil {
-		return exe, fmt.Errorf("codesign: %v: %s", err, out)
+		return exe, fmt.Errorf("codesign: %w: %s", err, out)
 	}
 	return exe, nil
 }

@@ -314,6 +314,7 @@ func ensureDaemon(ctx context.Context, sock string) error {
 		return nil
 	}
 	if launchAgentInstalled() {
+		//nolint:gosec // Both arguments are constants.
 		if err := exec.CommandContext(ctx, "launchctl", "kickstart", gui()+"/sh.tp.daemon").Run(); err == nil {
 			return waitForSock(ctx, sock)
 		}

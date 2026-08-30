@@ -39,7 +39,7 @@ func cmdUninstall(ctx context.Context, args []string) error {
 	}
 
 	fmt.Println("done")
-	if runtime.GOOS == "darwin" {
+	if runtime.GOOS == osDarwin {
 		// There is no per app reset for this service, so it is left to the user
 		// rather than clearing every app's decision behind their back.
 		fmt.Println("The local network permission entry stays until you run")
@@ -65,7 +65,7 @@ func uninstallTargets() []string {
 	if state, err := xdgPath("XDG_RUNTIME_DIR", ".local", "state"); err == nil {
 		out = append(out, state)
 	}
-	if runtime.GOOS == "darwin" {
+	if runtime.GOOS == osDarwin {
 		if p := launchAgentPath(); p != "" {
 			out = append(out, p)
 		}
@@ -77,7 +77,8 @@ func uninstallTargets() []string {
 }
 
 func stopDaemon(ctx context.Context) {
-	if runtime.GOOS == "darwin" {
+	if runtime.GOOS == osDarwin {
+		//nolint:gosec // Both arguments are constants.
 		_ = exec.CommandContext(ctx, "launchctl", "bootout", gui()+"/sh.tp.daemon").Run()
 	}
 	_ = exec.CommandContext(ctx, "pkill", "-f", "tp daemon").Run()
