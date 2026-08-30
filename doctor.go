@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -11,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
 )
@@ -23,6 +23,7 @@ type health struct {
 	Peers      []peer   `json:"peers"`
 	Diagnostic string   `json:"diagnostic"`
 	Packets    int64    `json:"packets"`
+	AnyPackets int64    `json:"any_packets"`
 	Uptime     string   `json:"uptime"`
 	Interfaces []string `json:"interfaces"`
 }
@@ -30,6 +31,7 @@ type health struct {
 func cmdDoctor(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
 	fix := fs.Bool("fix", false, "apply what this platform needs, where tp can do it itself")
+	listen := fs.Duration("listen", 0, "watch the multicast group for this long and report what arrives")
 	quiet := fs.Bool("quiet", false, "only print when something needs attention")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -37,6 +39,13 @@ func cmdDoctor(ctx context.Context, args []string) error {
 	if *fix {
 		return doctorFix(ctx, *quiet)
 	}
+	if *listen > 0 {
+		return watchMulticast(ctx, *listen)
+	}
+	return report(ctx)
+}
+
+func report(ctx context.Context) error {
 	fmt.Print(readBuildInfo())
 
 	var h health
@@ -47,7 +56,7 @@ func cmdDoctor(ctx context.Context, args []string) error {
 
 	fmt.Printf("daemon:      up %s\n", h.Uptime)
 	fmt.Printf("interfaces:  %v\n", h.Interfaces)
-	fmt.Printf("mdns in:     %d packets\n", h.Packets)
+	fmt.Printf("mdns in:     %d packets, %d of them from other machines\n", h.AnyPackets, h.Packets)
 
 	// The daemon lists itself, so one peer means nobody else was heard.
 	others := len(h.Peers) - 1
@@ -56,12 +65,9 @@ func cmdDoctor(ctx context.Context, args []string) error {
 		fmt.Printf("  %s  %s  %s\n", p.HostID, p.Hostname, p.Addr)
 	}
 
-	if runtime.GOOS == osDarwin {
-		state := "not installed"
-		if launchAgentInstalled() {
-			state = launchAgentPath()
-		}
-		fmt.Printf("launch agent: %s\n", state)
+	if launchAgentInstalled() {
+		fmt.Println("launch agent: present, and it stops the daemon being granted access")
+		fmt.Println("              remove it with tp doctor --fix")
 	}
 	if isWSL() {
 		mode := "mirrored"
@@ -71,13 +77,18 @@ func cmdDoctor(ctx context.Context, args []string) error {
 		fmt.Printf("wsl:         %s networking\n", mode)
 	}
 
-	if h.Packets > 0 && others > 0 {
+	if h.AnyPackets > 0 && others > 0 {
 		fmt.Println("\nDiscovery is working.")
 		return nil
 	}
-	if h.Packets > 0 {
-		fmt.Println("\nMulticast is arriving but no other tp host has announced itself.")
+	if h.AnyPackets > 0 {
+		fmt.Println("\nThis socket can receive multicast, and no other tp host has announced itself.")
 		fmt.Println("Start tp on the other machine and run this again.")
+		if h.Packets == 0 {
+			fmt.Println("Nothing at all has been heard from another machine, so if tp is")
+			fmt.Println("already running there, that side is the one to look at:")
+			fmt.Println("  tp doctor           on the other machine")
+		}
 		return nil
 	}
 
@@ -89,8 +100,7 @@ func cmdDoctor(ctx context.Context, args []string) error {
 }
 
 // doctorFix does the part of the advice that is ours to do rather than yours.
-// Only macOS has one: signing the daemon so the local network gate has an
-// identity to record. Everything else is a Windows setting or a router.
+// Only macOS has one.
 func doctorFix(ctx context.Context, quiet bool) error {
 	if runtime.GOOS != osDarwin {
 		if !quiet {
@@ -100,134 +110,142 @@ func doctorFix(ctx context.Context, quiet bool) error {
 		}
 		return nil
 	}
-	return installAgent(ctx)
+	return fixDarwin(ctx)
 }
 
-// installAgent gives the daemon an identity that the local network gate can
-// record. The Go linker ad-hoc signs every binary with the identifier "a.out",
-// so an unbundled tp is indistinguishable from every other Go program on the
-// machine: nehelper logs "found bundle id a.out by PID", the preference cannot
-// be stored against anything meaningful, and no prompt is ever shown. Copying
-// the binary into a minimal app bundle and re-signing it with a real identifier
-// is what makes the prompt appear and the toggle stick.
-func installAgent(ctx context.Context) error {
+// fixDarwin gives tp a code signing identity, because that is what macOS 15 and
+// later records a local network decision against, and the Go linker signs every
+// binary as a.out. Then it restarts the daemon and asks, so the decision is made
+// against the new identity.
+//
+// The daemon is forked by the command and inherits the command's identity, so
+// signing the one binary covers both. An earlier version of this installed a
+// launch agent instead. That was wrong: a launchd job has no responsible app, so
+// its request is denied whatever the pane says, and the agent is removed here.
+func fixDarwin(ctx context.Context) error {
+	if err := removeLegacyAgent(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "tp:", err)
+	}
+
 	self, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	app, err := installBundle(ctx, self)
-	if err != nil {
+	if err := signSelf(ctx, self); err != nil {
 		return err
 	}
 
-	path := launchAgentPath()
-	if path == "" {
-		return errors.New("cannot find your home directory")
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return err
-	}
-	if err := os.WriteFile(path, []byte(agentPlist(app)), 0o600); err != nil {
-		return err
-	}
-
-	// Replacing an older agent, so the previous one goes first and a failure
-	// there is not fatal.
-	//nolint:gosec // Every argument is a constant or a path we just built.
-	_ = exec.CommandContext(ctx, "launchctl", "bootout", gui()+"/sh.tp.daemon").Run()
+	// The daemon holds the multicast socket, and the decision is evaluated when
+	// it joins, so the old one has to go before we ask.
 	_ = exec.CommandContext(ctx, "pkill", "-f", "tp daemon").Run()
-	//nolint:gosec // Every argument is a constant or a path we just built.
-	if out, err := exec.CommandContext(ctx, "launchctl", "bootstrap", gui(), path).CombinedOutput(); err != nil {
-		return fmt.Errorf("launchctl bootstrap: %w: %s", err, out)
-	}
 
-	// The prompt is a notification when a background agent asks, and those are
-	// easy to miss or suppress. Asking again from this process, which is in the
-	// foreground and signed sh.tp, is what makes it a visible alert.
+	fmt.Printf("signed %s as %s\n", self, cliID)
 	if err := probeMulticast(); err != nil {
 		fmt.Fprintln(os.Stderr, "tp: could not send a probe:", err)
 	}
-
-	fmt.Printf("installed %s\n", path)
-	fmt.Printf("daemon     %s\n", app)
-	fmt.Println("macOS should now prompt: allow tp to find devices on local networks.")
-	fmt.Println("If you miss it: System Settings, Privacy and Security, Local Network.")
+	fmt.Println("macOS should now ask whether tp may find devices on local networks. Allow it.")
+	fmt.Println("If nothing appears, the decision is already recorded:")
+	fmt.Println("  open 'x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork'")
 	fmt.Println("Then run tp doctor.")
 	return nil
 }
 
-// bundleID is the code signing identifier and the CFBundleIdentifier, and it is
-// what shows up in Privacy and Security.
-const bundleID = "sh.tp.daemon"
+// cliID is the code signing identifier, and what shows up in Privacy and
+// Security. It has to be stable across upgrades or the decision is lost.
+const cliID = "sh.tp"
 
-// installBundle writes ~/Library/Application Support/tp/tp.app around a copy of
-// the binary and returns the executable inside it. A copy rather than a symlink
-// because codesign signs what it is pointed at, and the signature has to travel
-// with the file TCC sees.
-func installBundle(ctx context.Context, bin string) (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	app := filepath.Join(home, "Library", "Application Support", "tp", "tp.app")
-	macos := filepath.Join(app, "Contents", "MacOS")
-	if err := os.MkdirAll(macos, 0o750); err != nil {
-		return "", err
-	}
-
-	src, err := os.ReadFile(bin) //nolint:gosec // bin is os.Executable.
-	if err != nil {
-		return "", err
-	}
-	exe := filepath.Join(macos, "tp")
-	// Written aside and renamed: the running daemon may be this very file, and
-	// truncating a mapped executable kills it.
-	tmp := exe + ".new"
-	//nolint:gosec // 0o700 is owner only, and the daemon has to be executable.
-	if err := os.WriteFile(tmp, src, 0o700); err != nil {
-		return "", err
-	}
-	if err := os.Rename(tmp, exe); err != nil {
-		return "", err
-	}
-	if err := os.WriteFile(filepath.Join(app, "Contents", "Info.plist"), []byte(infoPlist()), 0o600); err != nil {
-		return "", err
-	}
-
+func signSelf(ctx context.Context, bin string) error {
 	if _, err := exec.LookPath("codesign"); err != nil {
-		return exe, fmt.Errorf("codesign is not installed, so the daemon keeps the "+
-			"identifier a.out and macOS cannot grant it local network access. "+
-			"Install the Xcode command line tools and run tp install-agent again: %w", err)
+		return fmt.Errorf("codesign is not installed, so tp keeps the identifier "+
+			"a.out and macOS cannot record a decision for it. Install the Xcode "+
+			"command line tools and run tp doctor --fix again: %w", err)
 	}
-	//nolint:gosec // The identifier is a constant and app is a path we just built.
+	//nolint:gosec // The identifier is a constant and bin is os.Executable.
 	out, err := exec.CommandContext(ctx, "codesign", "--force", "--sign", "-",
-		"--identifier", bundleID, app).CombinedOutput()
+		"--identifier", cliID, bin).CombinedOutput()
 	if err != nil {
-		return exe, fmt.Errorf("codesign: %w: %s", err, out)
+		return fmt.Errorf("codesign: %w: %s", err, out)
 	}
-	return exe, nil
+	return nil
 }
 
-func infoPlist() string {
-	return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleIdentifier</key><string>` + bundleID + `</string>
-  <key>CFBundleName</key><string>tp</string>
-  <key>CFBundleDisplayName</key><string>tp</string>
-  <key>CFBundleExecutable</key><string>tp</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
-  <key>LSBackgroundOnly</key><true/>
-  <key>NSLocalNetworkUsageDescription</key>
-  <string>tp finds other machines on this network so a paste can be fetched without a server.</string>
-</dict>
-</plist>
-`
+// removeLegacyAgent undoes the launch agent that versions up to v0.0.2
+// installed. Leaving it in place is worse than having nothing: the daemon runs
+// under launchd, is denied local network access, and no pane toggle changes that.
+func removeLegacyAgent(ctx context.Context) error {
+	path := launchAgentPath()
+	if path == "" {
+		return nil
+	}
+	if !launchAgentInstalled() {
+		return nil
+	}
+
+	//nolint:gosec // Both arguments are constants.
+	_ = exec.CommandContext(ctx, "launchctl", "bootout", gui()+"/sh.tp.daemon").Run()
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("removing the old launch agent at %s: %w", path, err)
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		_ = os.RemoveAll(filepath.Join(home, "Library", "Application Support", "tp"))
+	}
+	fmt.Println("removed the launch agent from an earlier version, which launchd could not be granted access for")
+	return nil
 }
 
 func gui() string { return fmt.Sprintf("gui/%d", os.Getuid()) }
+
+// watchMulticast joins the group in this process and reports every datagram,
+// which separates "the socket cannot receive" from "nobody else is talking".
+// A quiet home network with one machine on it is silent by nature, and the
+// daemon's own counter cannot tell the two apart.
+func watchMulticast(ctx context.Context, d time.Duration) error {
+	ifaces, err := usableInterfaces()
+	if err != nil {
+		return err
+	}
+	ifi := ifaces[0]
+	conn, err := net.ListenMulticastUDP("udp4", &ifi, &net.UDPAddr{IP: mdnsGroup, Port: mdnsPort})
+	if err != nil {
+		return fmt.Errorf("joining %s on %s: %w", mdnsGroup, ifi.Name, err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	fmt.Printf("listening on %s for %s, and asking once\n", ifi.Name, d)
+	if err := probeMulticast(); err != nil {
+		fmt.Fprintln(os.Stderr, "tp: could not send a probe:", err)
+	}
+
+	deadline := time.Now().Add(d)
+	if err := conn.SetReadDeadline(deadline); err != nil {
+		return err
+	}
+	sources := map[string]int{}
+	buf := make([]byte, 9000)
+	total := 0
+	for time.Now().Before(deadline) {
+		n, src, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			break
+		}
+		if n > 0 {
+			total++
+			sources[src.IP.String()]++
+		}
+	}
+
+	fmt.Printf("%d datagrams from %d sources\n", total, len(sources))
+	for ip, n := range sources {
+		fmt.Printf("  %-15s %d\n", ip, n)
+	}
+	if total == 0 {
+		fmt.Println("Nothing at all, so this socket cannot receive multicast.")
+		for _, line := range discoveryAdvice() {
+			fmt.Println(line)
+		}
+	}
+	return ctx.Err()
+}
 
 // probeMulticast sends one mDNS query, which is the thing macOS gates. Sending
 // it from the command rather than the daemon is deliberate: a background agent's
@@ -250,24 +268,4 @@ func probeMulticast() error {
 	defer func() { _ = conn.Close() }()
 	_, err = conn.Write(buf)
 	return err
-}
-
-func agentPlist(bin string) string {
-	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>sh.tp.daemon</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>%s</string>
-    <string>daemon</string>
-  </array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key>
-  <dict><key>SuccessfulExit</key><false/></dict>
-  <key>ProcessType</key><string>Background</string>
-</dict>
-</plist>
-`, bin)
 }

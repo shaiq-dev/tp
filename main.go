@@ -313,14 +313,6 @@ func ensureDaemon(ctx context.Context, sock string) error {
 	if dialSock(ctx, sock) {
 		return nil
 	}
-	if launchAgentInstalled() {
-		//nolint:gosec // Both arguments are constants.
-		if err := exec.CommandContext(ctx, "launchctl", "kickstart", gui()+"/sh.tp.daemon").Run(); err == nil {
-			return waitForSock(ctx, sock)
-		}
-		// Fall through and fork. A broken agent should not stop tp working.
-	}
-
 	self, err := os.Executable()
 	if err != nil {
 		return err

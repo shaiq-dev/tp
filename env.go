@@ -64,8 +64,9 @@ func wslNAT(ifaces []net.Interface) bool {
 	return seen
 }
 
-// launchAgentPath is where the installer puts the agent. Its presence is the
-// signal that the daemon should be started through launchd rather than forked.
+// launchAgentPath is where versions up to v0.0.2 put a launch agent. It is only
+// looked for so it can be removed: launchd jobs have no responsible app, so the
+// daemon was denied local network access whatever the settings pane said.
 func launchAgentPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -101,20 +102,15 @@ func discoveryAdvice() []string {
 			"  3. if inbound still fails, in an admin PowerShell:",
 			"       Set-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -DefaultInboundAction Allow",
 		}
-	case runtime.GOOS == osDarwin && !launchAgentInstalled():
-		return []string{
-			"macOS 15 and later records local network access per code signing identity,",
-			"and the Go linker signs every binary as a.out, so there is nothing to grant.",
-			"Sign the daemon as sh.tp.daemon and run it under launchd:",
-			"  tp doctor --fix",
-		}
 	case runtime.GOOS == osDarwin:
 		return []string{
-			"The daemon is installed and signed, so the decision is yours to make:",
-			"  open 'x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork'",
-			"and enable tp there. If the switch is already on, turn it off and on again:",
-			"a decision made before the daemon was signed applies to a different identity.",
-			"Nothing else resets it, and tccutil has no LocalNetwork service on macOS.",
+			"macOS 15 and later records local network access against a code signing",
+			"identity, and the Go linker signs every binary as a.out, so a plain tp has",
+			"nothing to grant. Sign it, restart the daemon and ask:",
+			"  tp doctor --fix",
+			"then allow tp when asked, or in System Settings, Privacy and Security,",
+			"Local Network. tccutil has no LocalNetwork service, so the pane is the only",
+			"place the decision can be changed.",
 		}
 	}
 	return nil

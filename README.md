@@ -90,26 +90,34 @@ attack offline.
   and drop multicast. `tp` cannot work there. It detects this at startup and
   says so rather than failing silently.
 - **macOS 15+ gates local network access per code signing identity.** The Go
-  linker ad-hoc signs every binary as `a.out`, so an unsigned `tp` has no
-  identity of its own to grant, and the request is denied with no prompt and no
-  entry in Settings. The installer re-signs the CLI as `sh.tp` and runs
-  `tp doctor --fix`, which puts the daemon in a signed bundle as
-  `sh.tp.daemon`. Allow it once in System Settings, Privacy and Security, Local
-  Network. If `tp` is not listed at all, an older denial is cached against
-  `a.out`: `tccutil reset LocalNetwork && tp doctor --fix`.
+  linker ad-hoc signs every binary as `a.out`, so an unsigned `tp` shares an
+  identity with every other Go program on the machine and there is nothing
+  meaningful to grant. The installer re-signs the binary as `sh.tp`, and the
+  daemon is forked by the command so it inherits that identity. Allow `tp` when
+  asked, or in System Settings, Privacy and Security, Local Network. `tccutil`
+  has no `LocalNetwork` service, so the pane is the only place to change it.
+  Run `tp doctor --fix` to re-sign, restart the daemon and ask again.
+
+  A launch agent does not work for this. A launchd job has no responsible app,
+  so it is denied whatever the pane says. Versions up to v0.0.2 installed one;
+  `tp doctor --fix` removes it.
 - **WSL2 in its default NAT mode cannot discover anything.** The VM is behind a
   virtual switch, so multicast never reaches the LAN in either direction. Set
   `networkingMode=mirrored` in `%UserProfile%\.wslconfig` and `wsl --shutdown`.
   The installer detects NAT mode and says so.
 - **The macOS firewall may prompt** on the first inbound connection.
 
-`tp uninstall` removes the binary, the daemon, the launch agent, the signed
-bundle and everything stored under XDG. It prints the list first and asks, or
-takes `--yes`.
+`tp uninstall` removes the binary, everything stored under XDG, and any launch
+agent left by an older version. It prints the list first and asks, or takes
+`--yes`.
 
 When discovery finds nothing, `tp doctor` prints what the daemon is seeing:
 which interfaces it joined, how many mDNS packets have arrived, which peers it
-knows, and the fix for whichever of the above applies.
+knows, and the fix for whichever of the above applies. `tp doctor --listen 10s`
+joins the group in the foreground and reports every datagram and its source,
+which separates a socket that cannot receive from a network where nobody else is
+talking. On a home network with one machine on it, the only source will be that
+machine, and that is not a fault.
 
 ## License
 

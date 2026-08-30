@@ -76,11 +76,17 @@ type peerTable struct {
 	mu sync.Mutex
 	m  map[string]peer
 
-	// packets counts inbound mDNS datagrams from any service. A LAN with working
-	// multicast is never silent, so zero means multicast is not arriving at all:
-	// AP isolation, or the macOS local network prompt.
-	packets atomic.Int64
-	started time.Time
+	// packets counts inbound mDNS datagrams from other machines, and anyPackets
+	// counts every one including this machine's own.
+	//
+	// The diagnostic uses anyPackets, because a home network whose only mDNS
+	// speaker is this Mac is silent by nature: mDNSResponder answering our own
+	// query arrives from our own address, and counting only other machines makes
+	// a working socket look blocked. A socket that cannot receive multicast at
+	// all sees nothing, not even that.
+	packets    atomic.Int64
+	anyPackets atomic.Int64
+	started    time.Time
 }
 
 func newPeerTable() *peerTable {
@@ -128,7 +134,7 @@ func (t *peerTable) sweep() {
 // diagnostic returns empty unless multicast is provably not arriving, which
 // otherwise reads as a bug in tp.
 func (t *peerTable) diagnostic() string {
-	if time.Since(t.started) < quietPeriod || t.packets.Load() > 0 {
+	if time.Since(t.started) < quietPeriod || t.anyPackets.Load() > 0 {
 		return ""
 	}
 	msg := "no multicast traffic is arriving, so discovery cannot work.\n"
@@ -337,6 +343,7 @@ func (r *responder) readLoop() {
 		if err != nil {
 			return
 		}
+		r.daemon.peers.anyPackets.Add(1)
 		if !r.isOwn(src) {
 			r.daemon.peers.packets.Add(1)
 		}

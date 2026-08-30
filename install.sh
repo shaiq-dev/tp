@@ -123,23 +123,14 @@ esac
 # Discovery is multicast, and two environments block it in ways that look like a
 # bug in tp. Both are worth saying here rather than leaving to a failed fetch.
 if [ "$os" = darwin ]; then
-  # macOS 15 and later gate local network access per app. A daemon forked by a
-  # terminal that has since exited has no app to attribute the request to, so it
-  # is denied with no prompt and no entry in Settings. A launch agent has an
-  # identity of its own.
-  if [ -z "${TP_NO_AGENT:-}" ]; then
-    echo
-    echo "Installing the launch agent, so macOS has something to grant local network access to."
-    if "$PREFIX/bin/tp" doctor --fix; then
-      :
-    else
-      echo "warning: could not install the launch agent. Run 'tp doctor --fix' yourself." >&2
-    fi
+  # macOS 15 and later records local network access against a code signing
+  # identity. The re-sign above gave tp one, and the daemon is forked by the
+  # command so it inherits it. doctor --fix restarts the daemon and asks.
+  echo
+  if "$PREFIX/bin/tp" doctor --fix; then
+    :
   else
-    echo
-    echo "TP_NO_AGENT is set, skipping the launch agent. On macOS 15 and later"
-    echo "discovery needs it, because a forked daemon cannot be granted local"
-    echo "network access. Run 'tp doctor --fix' when you want it."
+    echo "warning: could not ask for local network access. Run 'tp doctor --fix' yourself." >&2
   fi
 fi
 

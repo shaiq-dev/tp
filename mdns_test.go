@@ -60,17 +60,22 @@ func TestPeerTableDiagnostic(t *testing.T) {
 		name    string
 		started time.Time
 		packets int64
+		any     int64
 		want    bool
 	}{
-		{"too early to judge", time.Now(), 0, false},
-		{"traffic is arriving", time.Now().Add(-time.Minute), 1, false},
-		{"silent network", time.Now().Add(-time.Minute), 0, true},
+		{"too early to judge", time.Now(), 0, 0, false},
+		{"traffic is arriving", time.Now().Add(-time.Minute), 1, 1, false},
+		// The only speaker is this machine, which is normal on a home network and
+		// still proves the socket can receive.
+		{"only our own host is talking", time.Now().Add(-time.Minute), 0, 4, false},
+		{"nothing at all", time.Now().Add(-time.Minute), 0, 0, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tbl := newPeerTable()
 			tbl.started = tt.started
 			tbl.packets.Store(tt.packets)
+			tbl.anyPackets.Store(tt.any)
 			if got := tbl.diagnostic() != ""; got != tt.want {
 				t.Errorf("diagnostic present = %v, want %v", got, tt.want)
 			}

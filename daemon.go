@@ -517,11 +517,12 @@ func (d *daemon) handlePeers(w http.ResponseWriter, r *http.Request) {
 	}}, d.peers.list()...)
 
 	writeJSON(w, map[string]any{
-		"peers":      peers,
-		"diagnostic": d.peers.diagnostic(),
-		"packets":    d.peers.packets.Load(),
-		"uptime":     time.Since(d.started).Round(time.Second).String(),
-		"interfaces": ifaceNames(d.net.interfaces()),
+		"peers":       peers,
+		"diagnostic":  d.peers.diagnostic(),
+		"packets":     d.peers.packets.Load(),
+		"any_packets": d.peers.anyPackets.Load(),
+		"uptime":      time.Since(d.started).Round(time.Second).String(),
+		"interfaces":  ifaceNames(d.net.interfaces()),
 	})
 }
 
