@@ -5,11 +5,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+
+	"golang.org/x/net/dns/dnsmessage"
 )
 
 // doctor answers "why did discovery not find the other machine", which is
@@ -138,6 +141,13 @@ func installAgent(ctx context.Context) error {
 		return fmt.Errorf("launchctl bootstrap: %w: %s", err, out)
 	}
 
+	// The prompt is a notification when a background agent asks, and those are
+	// easy to miss or suppress. Asking again from this process, which is in the
+	// foreground and signed sh.tp, is what makes it a visible alert.
+	if err := probeMulticast(); err != nil {
+		fmt.Fprintln(os.Stderr, "tp: could not send a probe:", err)
+	}
+
 	fmt.Printf("installed %s\n", path)
 	fmt.Printf("daemon     %s\n", app)
 	fmt.Println("macOS should now prompt: allow tp to find devices on local networks.")
@@ -218,6 +228,29 @@ func infoPlist() string {
 }
 
 func gui() string { return fmt.Sprintf("gui/%d", os.Getuid()) }
+
+// probeMulticast sends one mDNS query, which is the thing macOS gates. Sending
+// it from the command rather than the daemon is deliberate: a background agent's
+// request arrives as a notification, and a foreground process gets an alert.
+func probeMulticast() error {
+	msg := dnsmessage.Message{Questions: []dnsmessage.Question{{
+		Name:  dnsmessage.MustNewName(mdnsService),
+		Type:  dnsmessage.TypePTR,
+		Class: dnsmessage.ClassINET,
+	}}}
+	buf, err := msg.Pack()
+	if err != nil {
+		return err
+	}
+
+	conn, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: mdnsGroup, Port: mdnsPort})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	_, err = conn.Write(buf)
+	return err
+}
 
 func agentPlist(bin string) string {
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>

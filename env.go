@@ -111,9 +111,10 @@ func discoveryAdvice() []string {
 	case runtime.GOOS == osDarwin:
 		return []string{
 			"The daemon is installed and signed, so the decision is yours to make:",
-			"  System Settings, Privacy and Security, Local Network, enable tp",
-			"If tp is not listed there, an older denial is cached against a.out:",
-			"  tccutil reset LocalNetwork && tp doctor --fix",
+			"  open 'x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork'",
+			"and enable tp there. If the switch is already on, turn it off and on again:",
+			"a decision made before the daemon was signed applies to a different identity.",
+			"Nothing else resets it, and tccutil has no LocalNetwork service on macOS.",
 		}
 	}
 	return nil
