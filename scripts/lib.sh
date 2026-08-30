@@ -19,5 +19,10 @@ fi
 
 # goarm and dist_arch translate a Go GOARCH into the name used in file names.
 # Only 32 bit arm needs the distinction.
-goarm() { [ "$1" = arm ] && echo 7 || echo ""; }
-dist_arch() { [ "$1" = arm ] && echo armv7 || echo "$1"; }
+goarm() {
+  if [ "$1" = arm ]; then echo 7; fi
+}
+
+dist_arch() {
+  if [ "$1" = arm ]; then echo armv7; else echo "$1"; fi
+}

@@ -90,7 +90,9 @@ minisign -Vm manifest.json -p tp.pub >/dev/null \
 line="$(grep -F "\"$target\"" manifest.json)" || die "this release has no build for $target"
 sum="$(printf '%s' "$line" | sed -n 's/.*"sha256" *: *"\([0-9a-f]\{64\}\)".*/\1/p')"
 file="$(printf '%s' "$line" | sed -n 's/.*"file" *: *"\([^"]*\)".*/\1/p')"
-[ -n "$sum" ] && [ -n "$file" ] || die "the manifest entry for $target is malformed"
+if [ -z "$sum" ] || [ -z "$file" ]; then
+  die "the manifest entry for $target is malformed"
+fi
 
 # The manifest is signed, so $file is trusted. Check it anyway. A plain file name
 # is all this script ever needs and a path would be a surprise.
