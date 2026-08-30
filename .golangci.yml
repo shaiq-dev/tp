@@ -128,15 +128,13 @@ linters:
       require-explanation: true
       require-specific: true
 
+# Formatters have no disable list in the v2 schema, so anything not enabled here
+# is off: gci and goimports are redundant with gofumpt's import grouping, golines
+# can break readability, and swaggo is for swaggo users.
 formatters:
   enable:
     - gofmt
     - gofumpt
-  disable:
-    - gci        # import grouping/ordering — gofumpt already handles standard grouping
-    - goimports  # import management — redundant with gofumpt
-    - golines    # line wrapping — too opinionated, can break readability
-    - swaggo     # swaggo comment formatting — only for swaggo users
   settings:
     gofumpt:
       extra:
