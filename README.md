@@ -89,10 +89,23 @@ attack offline.
 - **Guest, hotel and enterprise wifi usually block client-to-client traffic**
   and drop multicast. `tp` cannot work there. It detects this at startup and
   says so rather than failing silently.
-- **macOS 15+ prompts for Local Network access** on the first multicast send.
-  The prompt is attributed to your terminal app, not to `tp`. If discovery finds
-  nothing, check System Settings, Privacy and Security, Local Network.
+- **macOS 15+ gates local network access per code signing identity.** The Go
+  linker ad-hoc signs every binary as `a.out`, so an unsigned `tp` has no
+  identity of its own to grant, and the request is denied with no prompt and no
+  entry in Settings. The installer re-signs the CLI as `sh.tp` and runs
+  `tp doctor --fix`, which puts the daemon in a signed bundle as
+  `sh.tp.daemon`. Allow it once in System Settings, Privacy and Security, Local
+  Network. If `tp` is not listed at all, an older denial is cached against
+  `a.out`: `tccutil reset LocalNetwork && tp doctor --fix`.
+- **WSL2 in its default NAT mode cannot discover anything.** The VM is behind a
+  virtual switch, so multicast never reaches the LAN in either direction. Set
+  `networkingMode=mirrored` in `%UserProfile%\.wslconfig` and `wsl --shutdown`.
+  The installer detects NAT mode and says so.
 - **The macOS firewall may prompt** on the first inbound connection.
+
+When discovery finds nothing, `tp doctor` prints what the daemon is seeing:
+which interfaces it joined, how many mDNS packets have arrived, which peers it
+knows, and the fix for whichever of the above applies.
 
 ## License
 

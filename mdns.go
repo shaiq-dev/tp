@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -132,14 +131,12 @@ func (t *peerTable) diagnostic() string {
 	if time.Since(t.started) < quietPeriod || t.packets.Load() > 0 {
 		return ""
 	}
-	if runtime.GOOS == "darwin" {
-		return "no multicast traffic is arriving. On macOS 15 and later this is " +
-			"usually the Local Network prompt, which is attributed to your terminal " +
-			"app rather than to tp: System Settings, Privacy and Security, Local " +
-			"Network. Otherwise this network blocks client to client traffic."
+	msg := "no multicast traffic is arriving, so discovery cannot work.\n"
+	if advice := discoveryAdvice(); len(advice) > 0 {
+		return msg + strings.Join(advice, "\n") + "\nRun tp doctor for the full picture."
 	}
-	return "no multicast traffic is arriving, so this network blocks it. Guest, " +
-		"hotel and enterprise wifi usually do. tp get --host still works."
+	return msg + "This network blocks client to client traffic. Guest, hotel and " +
+		"enterprise wifi usually do. Run tp doctor for the full picture."
 }
 
 // listenMDNS binds port 5353 alongside mDNSResponder on macOS and Avahi on

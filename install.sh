@@ -105,11 +105,67 @@ mkdir -p "$PREFIX/bin"
 chmod 0755 "$bin"
 mv "$bin" "$PREFIX/bin/tp"
 
+# The Go linker ad-hoc signs with the identifier "a.out", which every Go binary
+# on the machine shares, so macOS has nothing to record a local network decision
+# against. Re-signing with our own identifier gives the CLI an identity of its
+# own, and install-agent below does the same for the daemon.
+if [ "$os" = darwin ] && command -v codesign >/dev/null 2>&1; then
+  codesign --force --sign - --identifier sh.tp "$PREFIX/bin/tp" 2>/dev/null \
+    || echo "warning: could not re-sign tp, macOS may deny it local network access" >&2
+fi
+
 version="$("$PREFIX/bin/tp" version 2>/dev/null | head -n 1 || echo tp)"
 echo "installed $version to $PREFIX/bin/tp"
 case ":$PATH:" in
   *":$PREFIX/bin:"*) ;;
   *) echo "warning: $PREFIX/bin is not on your PATH. Add it to your shell profile yourself. This script does not edit rc files." >&2 ;;
 esac
+# Discovery is multicast, and two environments block it in ways that look like a
+# bug in tp. Both are worth saying here rather than leaving to a failed fetch.
+if [ "$os" = darwin ]; then
+  # macOS 15 and later gate local network access per app. A daemon forked by a
+  # terminal that has since exited has no app to attribute the request to, so it
+  # is denied with no prompt and no entry in Settings. A launch agent has an
+  # identity of its own.
+  if [ -z "${TP_NO_AGENT:-}" ]; then
+    echo
+    echo "Installing the launch agent, so macOS has something to grant local network access to."
+    if "$PREFIX/bin/tp" doctor --fix; then
+      :
+    else
+      echo "warning: could not install the launch agent. Run 'tp doctor --fix' yourself." >&2
+    fi
+  else
+    echo
+    echo "TP_NO_AGENT is set, skipping the launch agent. On macOS 15 and later"
+    echo "discovery needs it, because a forked daemon cannot be granted local"
+    echo "network access. Run 'tp doctor --fix' when you want it."
+  fi
+fi
+
+if [ "$os" = linux ] && grep -qiE "microsoft|wsl" /proc/sys/kernel/osrelease 2>/dev/null; then
+  # NAT is the default networkingMode and keeps multicast inside the VM, so no
+  # announcement ever reaches the LAN and none arrives from it.
+  if ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | grep -qvE '^172\.(1[6-9]|2[0-9]|3[01])\.'; then
+    echo
+    echo "WSL detected, mirrored networking. Discovery should work."
+  else
+    echo
+    echo "WSL detected, and it is in NAT mode. Multicast never leaves the VM, so"
+    echo "tp cannot find other machines and they cannot find this one."
+    echo
+    echo "  1. in Windows, put this in %UserProfile%\\.wslconfig"
+    echo "       [wsl2]"
+    echo "       networkingMode=mirrored"
+    echo "  2. wsl --shutdown"
+    echo "  3. if inbound still fails, in an admin PowerShell:"
+    echo "       Set-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -DefaultInboundAction Allow"
+    echo
+    echo "Until then only 'tp get --host <addr>' works, and only outbound."
+  fi
+fi
+
+echo
 echo "Run 'tp post' to start. The daemon starts itself on first use."
+echo "If discovery finds nothing, run 'tp doctor'."
 echo "Shell completions: tp completion zsh   (also bash and fish)"

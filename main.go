@@ -33,6 +33,9 @@ const usage = `tp shares a paste with another machine on the same network.
   tp list            show the pastes this machine is serving
   tp del <code>      stop serving a paste
 
+  tp doctor          explain why discovery is not finding other machines
+  tp doctor --fix    apply what this platform needs, where tp can do it itself
+
   tp completion <bash|zsh|fish>
   tp version
 `
@@ -68,6 +71,8 @@ func run(ctx context.Context, args []string) error {
 		return cmdList(ctx)
 	case "del":
 		return cmdDel(ctx, rest)
+	case "doctor":
+		return cmdDoctor(ctx, rest)
 	case "completion":
 		return cmdCompletion(rest)
 	case "version":
@@ -305,6 +310,13 @@ func ensureDaemon(ctx context.Context, sock string) error {
 	if dialSock(ctx, sock) {
 		return nil
 	}
+	if launchAgentInstalled() {
+		if err := exec.CommandContext(ctx, "launchctl", "kickstart", gui()+"/sh.tp.daemon").Run(); err == nil {
+			return waitForSock(ctx, sock)
+		}
+		// Fall through and fork. A broken agent should not stop tp working.
+	}
+
 	self, err := os.Executable()
 	if err != nil {
 		return err
@@ -320,6 +332,10 @@ func ensureDaemon(ctx context.Context, sock string) error {
 	}
 	go func() { _ = cmd.Wait() }()
 
+	return waitForSock(ctx, sock)
+}
+
+func waitForSock(ctx context.Context, sock string) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	for {

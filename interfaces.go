@@ -75,6 +75,18 @@ func (f *netFilter) serves(local net.Addr) bool {
 	return f.isOwnAddr(host)
 }
 
+func ifaceNames(ifaces []net.Interface) []string {
+	out := make([]string, 0, len(ifaces))
+	for _, ifi := range ifaces {
+		name := ifi.Name
+		if ip := ip4(ifi); ip != nil {
+			name += " " + ip.String()
+		}
+		out = append(out, name)
+	}
+	return out
+}
+
 func sameAddrs(a, b map[string]bool) bool {
 	if len(a) != len(b) {
 		return false
