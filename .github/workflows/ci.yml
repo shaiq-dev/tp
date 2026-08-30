@@ -34,10 +34,8 @@ jobs:
         with:
           version: v2.13.2
       - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
-      - uses: ludeeus/action-shellcheck@master
-        with:
-          version: v0.11.0
-          additional_files: install.sh
+      # -x so it follows scripts/lib.sh instead of reporting SC1091.
+      - run: shellcheck -x install.sh scripts/*.sh
 
   # Cross building and packaging break silently, so the release path runs on
   # every push rather than only on a tag.

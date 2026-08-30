@@ -71,7 +71,7 @@ check:
 	go tool golangci-lint run ./...
 	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 	@if command -v shellcheck >/dev/null 2>&1; then \
-	  shellcheck install.sh scripts/*.sh; \
+	  shellcheck -x install.sh scripts/*.sh; \
 	else \
 	  echo "shellcheck not installed, skipping the shell scripts" >&2; \
 	fi
