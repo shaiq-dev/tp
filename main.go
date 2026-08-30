@@ -35,6 +35,7 @@ const usage = `tp shares a paste with another machine on the same network.
 
   tp doctor          explain why discovery is not finding other machines
   tp doctor --fix    apply what this platform needs, where tp can do it itself
+  tp uninstall       remove the binary, the daemon and everything it stored
 
   tp completion <bash|zsh|fish>
   tp version
@@ -73,6 +74,8 @@ func run(ctx context.Context, args []string) error {
 		return cmdDel(ctx, rest)
 	case "doctor":
 		return cmdDoctor(ctx, rest)
+	case "uninstall":
+		return cmdUninstall(ctx, rest)
 	case "completion":
 		return cmdCompletion(rest)
 	case "version":

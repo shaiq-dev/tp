@@ -620,6 +620,16 @@ func sockPath() (string, error) {
 }
 
 func xdgDir(env string, fallback ...string) (string, error) {
+	dir, err := xdgPath(env, fallback...)
+	if err != nil {
+		return "", err
+	}
+	return dir, os.MkdirAll(dir, 0o700) //nolint:gosec // dir comes from the user's own XDG environment.
+}
+
+// xdgPath is xdgDir without the side effect, for code that wants to know where
+// something would be rather than to use it.
+func xdgPath(env string, fallback ...string) (string, error) {
 	dir := os.Getenv(env)
 	if dir == "" {
 		home, err := os.UserHomeDir()
@@ -628,6 +638,5 @@ func xdgDir(env string, fallback ...string) (string, error) {
 		}
 		dir = filepath.Join(append([]string{home}, fallback...)...)
 	}
-	dir = filepath.Join(dir, "tp")
-	return dir, os.MkdirAll(dir, 0o700) //nolint:gosec // dir comes from the user's own XDG environment.
+	return filepath.Join(dir, "tp"), nil
 }

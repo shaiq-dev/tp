@@ -103,6 +103,10 @@ attack offline.
   The installer detects NAT mode and says so.
 - **The macOS firewall may prompt** on the first inbound connection.
 
+`tp uninstall` removes the binary, the daemon, the launch agent, the signed
+bundle and everything stored under XDG. It prints the list first and asks, or
+takes `--yes`.
+
 When discovery finds nothing, `tp doctor` prints what the daemon is seeing:
 which interfaces it joined, how many mDNS packets have arrived, which peers it
 knows, and the fix for whichever of the above applies.
