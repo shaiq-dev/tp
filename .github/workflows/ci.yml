@@ -58,7 +58,7 @@ jobs:
           path: dist/
           retention-days: 7
 
-  # Sign a throwaway release and install it, so a broken installer cannot ship.
+  # Install from a throwaway release, so a broken installer cannot ship.
   install-script:
     runs-on: ubuntu-latest
     needs: dist
@@ -68,19 +68,6 @@ jobs:
         with:
           name: dist
           path: dist
-      - run: sudo apt-get update && sudo apt-get install -y minisign
-      - name: Sign with a throwaway key
-        run: |
-          minisign -G -f -W -p test.pub -s test.key
-          minisign -Sm dist/manifest.json -s test.key
-          # Swap the embedded trust anchor for the throwaway one, matching the
-          # key line by shape so rotating the real key cannot break this test.
-          pub="$(sed -n 2p test.pub)"
-          sed -i "s|^RW[A-Za-z0-9+/=]\{1,\}\"|$pub\"|" install.sh
-          grep -qF "$pub" install.sh || {
-            echo "could not patch the public key into install.sh" >&2
-            exit 1
-          }
       - name: Install from a local release
         run: |
           (cd dist && python3 -m http.server 8731 &)

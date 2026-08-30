@@ -25,7 +25,6 @@ help:
 	@echo "make check      everything CI runs"
 	@echo "make dist       cross build every platform into $(DIST)/"
 	@echo "make manifest   rebuild $(DIST)/manifest.json from existing tarballs"
-	@echo "make sign       minisign $(DIST)/manifest.json, normally done by CI"
 	@echo "make clean      remove build output"
 	@echo
 	@echo "VERSION=$(VERSION)"
@@ -84,10 +83,6 @@ dist: clean
 .PHONY: manifest
 manifest:
 	scripts/manifest.sh
-
-.PHONY: sign
-sign:
-	minisign -Sm $(DIST)/manifest.json
 
 .PHONY: clean
 clean:

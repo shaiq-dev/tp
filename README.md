@@ -18,10 +18,9 @@ fetcher over TLS. Process exit or reboot destroys everything.
 curl -fsSL https://raw.githubusercontent.com/shaiq-dev/tp/main/install.sh | sh
 ```
 
-The script verifies a signed release manifest before it unpacks anything, so it
-needs [minisign](https://jedisct1.github.io/minisign/) (`brew install minisign`,
-`apt install minisign`, `dnf install minisign`, `apk add minisign`). It installs
-to `~/.local/bin/tp`, never uses `sudo`, and does not touch your shell rc files.
+Needs nothing but `curl` and `tar`. Downloads are checked against a SHA-256 from
+the release manifest. It installs to `~/.local/bin/tp`, never uses `sudo`, and
+does not touch your shell rc files.
 
 Pick a version or a location with `TP_VERSION=v0.1.0` and `TP_PREFIX=/opt/tp`.
 

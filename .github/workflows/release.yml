@@ -22,17 +22,6 @@ jobs:
       - name: Build every platform
         run: make dist VERSION="${GITHUB_REF_NAME}"
 
-      - name: Sign the manifest
-        env:
-          MINISIGN_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
-          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
-        run: |
-          sudo apt-get update && sudo apt-get install -y minisign
-          key="$(mktemp)"
-          printf '%s\n' "$MINISIGN_KEY" | sed '/^[[:space:]]*$/d' > "$key"
-          echo "$MINISIGN_PASSWORD" | minisign -Sm dist/manifest.json -s "$key"
-          shred -u "$key"
-
       - name: Publish the install script and its checksum
         run: |
           cp install.sh dist/
@@ -44,6 +33,5 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/manifest.json
-            dist/manifest.json.minisig
             dist/SHA256SUMS
             dist/install.sh

@@ -1,9 +1,9 @@
 #!/bin/sh
 # tp installer. Read it before you run it. It is meant to be read.
 #
-# The trust anchor is the minisign public key embedded below. Everything else,
-# including the host serving the files, is untrusted: the manifest is signed
-# against that key and every download is checked against the manifest.
+# Downloads are checked against a SHA-256 published in the release manifest,
+# which catches a corrupted or truncated transfer. Both the manifest and the
+# tarball come over HTTPS from GitHub, so GitHub is the thing being trusted.
 #
 #   TP_VERSION=v0.1.0 sh install.sh    install a specific tag
 #   TP_PREFIX=/opt/tp sh install.sh    install somewhere else
@@ -11,8 +11,6 @@ set -eu
 
 REPO="${TP_REPO:-shaiq-dev/tp}"
 PREFIX="${TP_PREFIX:-$HOME/.local}"
-PUBKEY="untrusted comment: minisign public key
-RWQZqgh7RiD98s4R6KmvhFfM+sTf/7IQIHSX5Zzj1dGNh+dJKQ3hrBmR"
 
 if [ -n "${TP_VERSION:-}" ]; then
   BASE="https://github.com/$REPO/releases/download/$TP_VERSION"
@@ -49,28 +47,25 @@ target="${os}_${arch}"
 
 command -v curl >/dev/null 2>&1 || die "curl is required"
 command -v tar  >/dev/null 2>&1 || die "tar is required"
-command -v minisign >/dev/null 2>&1 || die "minisign is required to verify the release signature.
-  macOS:  brew install minisign
-  Debian: apt install minisign
-  Fedora: dnf install minisign
-  Alpine: apk add minisign
-Verifying that signature is the whole point of this script, so there is no way
-to skip it. To build from source instead: go install github.com/$REPO@latest"
 
-# HTTPS only, redirects included, unless the caller deliberately points this at
-# something else. The signature is what makes the artifacts trustworthy, so a
-# plain HTTP mirror is survivable, but it should never happen by accident.
-case "$BASE" in
-  https://*) fetch() { curl -fsSL --proto '=https' --tlsv1.2 -o "$1" "$2"; } ;;
-  *) echo "warning: $BASE is not https. The signature still has to verify." >&2
-     fetch() { curl -fsSL -o "$1" "$2"; } ;;
-esac
-
+# Whichever of these the machine has. One of them always does.
 if command -v sha256sum >/dev/null 2>&1; then
   checksum() { sha256sum "$1" | cut -d' ' -f1; }
-else
+elif command -v shasum >/dev/null 2>&1; then
   checksum() { shasum -a 256 "$1" | cut -d' ' -f1; }
+elif command -v openssl >/dev/null 2>&1; then
+  checksum() { openssl dgst -sha256 "$1" | tr ' ' '\n' | tail -n 1; }
+else
+  die "none of sha256sum, shasum or openssl is available, so the download cannot be checked"
 fi
+
+# HTTPS only, redirects included, unless the caller deliberately points this at
+# something else.
+case "$BASE" in
+  https://*) fetch() { curl -fsSL --proto '=https' --tlsv1.2 -o "$1" "$2"; } ;;
+  *) echo "warning: $BASE is not https" >&2
+     fetch() { curl -fsSL -o "$1" "$2"; } ;;
+esac
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
@@ -78,12 +73,6 @@ cd "$tmp"
 
 fetch manifest.json "$BASE/manifest.json" \
   || die "could not fetch the manifest from $BASE"
-fetch manifest.json.minisig "$BASE/manifest.json.minisig" \
-  || die "could not fetch the manifest signature from $BASE"
-
-printf '%s\n' "$PUBKEY" > tp.pub
-minisign -Vm manifest.json -p tp.pub >/dev/null \
-  || die "the manifest signature does not verify. Stopping."
 
 # The manifest is one flat line per target so a shell can read it without a
 # JSON parser: "linux_amd64": { "sha256": "...", "file": "..." }
@@ -94,8 +83,8 @@ if [ -z "$sum" ] || [ -z "$file" ]; then
   die "the manifest entry for $target is malformed"
 fi
 
-# The manifest is signed, so $file is trusted. Check it anyway. A plain file name
-# is all this script ever needs and a path would be a surprise.
+# A plain file name is all this script ever needs, and the manifest is only as
+# trustworthy as the host that served it, so a path here is refused.
 case "$file" in
   */*|.*|"") die "the manifest names a suspicious file: $file" ;;
 esac
@@ -106,8 +95,7 @@ got="$(checksum "$file")"
   expected $sum
   got      $got"
 
-# Only now, after the signature and the checksum both passed, is anything
-# unpacked or made executable.
+# Only after the checksum passes is anything unpacked or made executable.
 mkdir -p unpacked
 tar -xzf "$file" -C unpacked
 bin="$(find unpacked -type f -name tp -print | head -n 1)"
