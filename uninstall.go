@@ -40,11 +40,12 @@ func cmdUninstall(ctx context.Context, args []string) error {
 
 	fmt.Println("done")
 	if runtime.GOOS == osDarwin {
-		// There is no per app reset for this service, so it is left to the user
-		// rather than clearing every app's decision behind their back.
-		fmt.Println("The local network permission entry stays until you run")
-		fmt.Println("  tccutil reset LocalNetwork")
-		fmt.Println("which resets it for every app, so it is usually not worth it.")
+		// Nothing removes a single entry. tccutil has no LocalNetwork service at
+		// all: tccd answers "Service name is invalid on this platform". The pane
+		// only toggles, and the store is a keyed archive nehelper holds open.
+		fmt.Println("The Local Network entry for tp stays in System Settings. Nothing removes")
+		fmt.Println("one: the pane only toggles, and tccutil has no LocalNetwork service. It")
+		fmt.Println("is inert now the binary is gone.")
 	}
 	return nil
 }
