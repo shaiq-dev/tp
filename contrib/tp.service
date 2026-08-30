@@ -1,0 +1,23 @@
+# Optional. tp does not need this: the CLI forks the daemon when the socket is
+# absent. Install it only if you want tp serving before you log in.
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp contrib/tp.service ~/.config/systemd/user/
+#   systemctl --user enable --now tp
+#   loginctl enable-linger "$USER"     # survive logout
+[Unit]
+Description=tp paste daemon
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/tp daemon
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/tp %t/tp
+
+[Install]
+WantedBy=default.target

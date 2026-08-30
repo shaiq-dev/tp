@@ -1,0 +1,87 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.13.2
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - run: shellcheck install.sh scripts/*.sh
+
+  # Cross building and packaging break silently, so the release path runs on
+  # every push rather than only on a tag.
+  dist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make dist VERSION=v0.0.0-ci
+      - run: |
+          for f in dist/*.tar.gz; do
+            tar tzf "$f" | grep -q '/tp$' || { echo "$f has no binary"; exit 1; }
+          done
+          cd dist && sha256sum -c SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+
+  # Sign a throwaway release and install it, so a broken installer cannot ship.
+  install-script:
+    runs-on: ubuntu-latest
+    needs: dist
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - run: sudo apt-get update && sudo apt-get install -y minisign
+      - name: Sign with a throwaway key
+        run: |
+          minisign -G -f -W -p test.pub -s test.key
+          minisign -Sm dist/manifest.json -s test.key
+          sed -i "s|RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLnL1eEZFrn|$(sed -n 2p test.pub)|" install.sh
+      - name: Install from a local release
+        run: |
+          (cd dist && python3 -m http.server 8731 &)
+          sleep 2
+          TP_RELEASE_BASE=http://127.0.0.1:8731 TP_PREFIX="$RUNNER_TEMP/tp" sh install.sh
+          "$RUNNER_TEMP/tp/bin/tp" version
+      - name: Reject a tampered download
+        run: |
+          printf 'x' >> dist/tp_v0.0.0-ci_linux_amd64.tar.gz
+          if TP_RELEASE_BASE=http://127.0.0.1:8731 TP_PREFIX="$RUNNER_TEMP/bad" sh install.sh; then
+            echo "the installer accepted a tampered tarball"; exit 1
+          fi

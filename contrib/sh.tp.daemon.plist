@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Optional. tp forks its own daemon on first use; this only makes it start
+     at login.
+
+       cp contrib/sh.tp.daemon.plist ~/Library/LaunchAgents/
+       launchctl bootstrap gui/$UID ~/Library/LaunchAgents/sh.tp.daemon.plist
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>sh.tp.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>sh</string>
+    <string>-c</string>
+    <string>exec "$HOME/.local/bin/tp" daemon</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key>
+  <dict><key>SuccessfulExit</key><false/></dict>
+  <key>ProcessType</key><string>Background</string>
+</dict>
+</plist>
