@@ -34,11 +34,8 @@ jobs:
         with:
           version: v2.13.2
       - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
-      # -x so it follows scripts/lib.sh instead of reporting SC1091.
       - run: shellcheck -x install.sh scripts/*.sh
 
-  # Cross building and packaging break silently, so the release path runs on
-  # every push rather than only on a tag.
   dist:
     runs-on: ubuntu-latest
     steps:
@@ -58,7 +55,6 @@ jobs:
           path: dist/
           retention-days: 7
 
-  # Install from a throwaway release, so a broken installer cannot ship.
   install-script:
     runs-on: ubuntu-latest
     needs: dist

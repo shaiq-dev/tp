@@ -11,8 +11,7 @@ import (
 	"time"
 )
 
-// newTestDaemon brings up a real TLS listener, so the handshake runs against a
-// genuine channel binding rather than a stub.
+// Use real TLS because the PAKE exchange depends on the TLS channel binding.
 func newTestDaemon(t *testing.T) (*daemon, string) {
 	t.Helper()
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
@@ -146,9 +145,8 @@ func TestHandshake(t *testing.T) {
 	}
 }
 
-// A fetch reaches every host on the LAN, so any per paste penalty for a failed
-// exchange would destroy bystanders' pastes during normal use. This is why there
-// is no per paste guess budget.
+// A fetch reaches every discovered host. Charging failed exchanges to individual
+// pastes would let normal fan out consume unrelated pastes.
 func TestFanOutDoesNotChargeBystanders(t *testing.T) {
 	d, addr := newTestDaemon(t)
 	addTestPaste(t, d, "acid-acorn-acre", "not yours")
@@ -177,13 +175,13 @@ func TestFanOutDoesNotChargeBystanders(t *testing.T) {
 	}
 }
 
-// Regression for the burn attack, where the client named the paste its failed
-// confirmation was charged to and could destroy any paste in five connections.
+// Regression: clients could once charge failed confirmations to a chosen paste
+// and burn it with five bogus attempts.
 func TestGarbageConfirmationDestroysNothing(t *testing.T) {
 	d, addr := newTestDaemon(t)
 	prs := addTestPaste(t, d, "acid-acorn-acre", "still here")
 
-	// One short of rateBurst, leaving the honest fetch below a token.
+	// Leave the last burst token for the valid fetch.
 	for range rateBurst - 1 {
 		if err := sendGarbageConfirmation(addr); err != nil {
 			t.Fatal(err)
@@ -195,8 +193,7 @@ func TestGarbageConfirmationDestroysNothing(t *testing.T) {
 	}
 }
 
-// sendGarbageConfirmation runs a valid handshake up to the confirmation step,
-// then sends a tag that cannot match anything.
+// Complete enough of the handshake to submit a well formed but invalid tag.
 func sendGarbageConfirmation(addr string) error {
 	raw, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -230,8 +227,7 @@ func sendGarbageConfirmation(addr string) error {
 	if err := writeFrame(conn, make([]byte, macLen)); err != nil {
 		return err
 	}
-	// Blocks until the server hangs up, so the attempt is fully processed before
-	// the next one starts.
+	// Wait for the server to process this attempt before opening the next connection.
 	readFrame(conn, maxFrame)
 	return nil
 }
@@ -297,8 +293,8 @@ func TestReadFrameRejectsOversizedFrames(t *testing.T) {
 	}
 }
 
-// Posting and fetching on one machine cannot go through discovery, since a
-// daemon never learns about itself from its own announcements.
+// The daemon ignores its own mDNS announcements, so local fetches need an
+// explicit self entry.
 func TestPeersIncludesThisMachine(t *testing.T) {
 	d, _ := newTestDaemon(t)
 	srv := newControlServer(t, d)

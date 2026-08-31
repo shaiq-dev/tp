@@ -18,8 +18,8 @@ func TestLoadIdentityIsStable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The certificate is regenerated on every start, so the host ID has to come
-	// from the key rather than the certificate, or every pin breaks on restart.
+	// Certificates are regenerated, so host IDs and pins must remain tied to the
+	// persisted key.
 	if a, b := hostID(first.Leaf.RawSubjectPublicKeyInfo), hostID(second.Leaf.RawSubjectPublicKeyInfo); a != b {
 		t.Errorf("host ID changed across loads: %s then %s", a, b)
 	}

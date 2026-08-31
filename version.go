@@ -7,9 +7,8 @@ import (
 	"strings"
 )
 
-// version is stamped by the release build with -ldflags "-X main.version=...".
-// Builds that skip the Makefile, go install among them, leave it empty and fall
-// back to the module version and VCS stamps in debug.BuildInfo.
+// Release builds set version through -ldflags. Other builds fall back to module
+// and VCS metadata from debug.BuildInfo.
 var version string
 
 type buildInfo struct {

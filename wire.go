@@ -12,28 +12,28 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
-// The data plane speaks a four message framed exchange over TLS 1.3 rather than
-// HTTP. A balanced PAKE needs two round trips before any payload can be
-// released, and one HTTP request and response is one round trip.
+// The data plane uses four length prefixed messages over TLS 1.3. A balanced
+// PAKE needs two round trips before releasing the payload, so it does not fit
+// into a single HTTP request and response.
 //
 //  1. client to server   version || Ya
 //  2. server to client   n || n*(Yb_i || MACs_i)
 //  3. client to server   MACc
 //  4. server to client   payload
 //
-// The server does not know which of its pastes a code belongs to, so it runs one
-// CPace instance per paste and answers for all of them. The client finds its own
-// by which server confirmation verifies. A wrong code verifies none: computing
-// any K_i needs the discrete log of Ya under that paste's generator, which only
-// the right password produces.
+// The server cannot tell which paste a code belongs to, so it runs one CPace
+// instance per candidate and returns every server confirmation. The client
+// selects the one that verifies. With a wrong code, matching the server's secret
+// would require the discrete log of Ya under the correct password derived
+// generator, so no confirmation verifies.
 const (
 	wireVersion = 1
 	pointLen    = 32
 	macLen      = 32
 
-	// alpnProto names the protocol inside the TLS handshake, so an unsupported
-	// peer fails there rather than halfway through an exchange. A later client
-	// offers "tp/2" first and falls back to this.
+	// Negotiate the wire protocol during TLS so incompatible peers fail before
+	// starting an exchange. A future client can offer "tp/2" first and fall back
+	// to this version.
 	alpnProto = "tp/1"
 
 	aeadOverhead = chacha20poly1305.Overhead
@@ -42,8 +42,8 @@ const (
 	maxFrame = maxPasteSize + 64*1024
 )
 
-// maxOfferLen bounds the largest handshake frame: one point and one tag for
-// every candidate the server offers.
+// The largest offer contains one public point and confirmation tag per
+// candidate, plus its candidate count.
 const maxOfferLen = 2 + maxCandidates*(pointLen+macLen)
 
 var (
@@ -51,16 +51,15 @@ var (
 	errNoMatch  = errors.New("no paste for that code on this host")
 )
 
-// channelBinding ties the PAKE transcript to this exact TLS connection. Two
-// connections have different exporter values, so an exchange cannot be relayed
-// from one into another.
+// Bind the PAKE transcript to the TLS exporter so messages from one connection
+// cannot be relayed into another.
 func channelBinding(c *tls.Conn) ([]byte, error) {
 	state := c.ConnectionState()
 	return state.ExportKeyingMaterial("tp/cb/v1", nil, 32)
 }
 
-// channelID is the CPace CI input. Both sides derive it from the protocol
-// version and the host ID the certificate commits to.
+// channelID is the CPace CI input derived from the protocol version and the host
+// identity committed to by the certificate key.
 func channelID(serverHostID string) []byte {
 	return lvCat([]byte("tp/v1"), []byte(serverHostID))
 }
@@ -78,8 +77,8 @@ func writeFrame(w io.Writer, b []byte) error {
 	return err
 }
 
-// readFrame bounds the allocation a peer can provoke. Handshake frames are tens
-// of bytes, so only the payload read passes maxFrame.
+// Validate the advertised length before allocating. Handshake callers use
+// tighter limits, only the payload reader permits maxFrame.
 func readFrame(r io.Reader, limit uint32) ([]byte, error) {
 	var hdr [4]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
@@ -96,8 +95,7 @@ func readFrame(r io.Reader, limit uint32) ([]byte, error) {
 	return b, nil
 }
 
-// pakeSide is one CPace instance, meaning one paste on the server or the single
-// code the client holds.
+// pakeSide represents one server candidate or the client's single code.
 type pakeSide struct {
 	scalar *ristretto255.Scalar
 	share  []byte
@@ -113,7 +111,7 @@ func newPakeSide(prs, ci, sid []byte) *pakeSide {
 	}
 }
 
-// finish completes the exchange against the peer's share and sets sk.
+// finish validates the peer's share and derives the intermediate session key.
 func (p *pakeSide) finish(peerShare, sid []byte) error {
 	k, err := scalarMultVfy(p.scalar, peerShare)
 	if err != nil {
@@ -126,15 +124,16 @@ func (p *pakeSide) finish(peerShare, sid []byte) error {
 func (p *pakeSide) serverTag() []byte { return confirm(p.sk, "tp/confirm/server") }
 func (p *pakeSide) clientTag() []byte { return confirm(p.sk, "tp/confirm/client") }
 
-// seal encrypts the paste under a key derived from the session key, on top of
-// the TLS already covering it. TLS is a large piece of code with a steady supply
-// of advisories, and a break in one exposes ciphertext this way rather than
-// pastes. The nonce is fixed because the key encrypts exactly one message: the
-// session key is unique per connection, since the channel binding feeding it
-// is.
-// The caller passes a buffer with aeadOverhead spare capacity, so this encrypts
-// in place. At the paste and connection caps a second full sized copy per
-// transfer runs to hundreds of megabytes.
+// seal adds application layer encryption under a key derived from the PAKE
+// session. This is independent of TLS record encryption, so a compromise of
+// that layer alone still exposes only the inner ciphertext.
+//
+// The zero nonce is safe because each derived key encrypts exactly one payload.
+// The session key is unique to its TLS connection through the channel binding.
+//
+// The caller provides room for the AEAD tag, allowing Seal to reuse the payload
+// buffer. Avoiding a second full size copy matters at the paste and connection
+// limits, where those allocations can total hundreds of megabytes.
 func (p *pakeSide) seal(body []byte) ([]byte, error) {
 	aead, err := p.aead()
 	if err != nil {

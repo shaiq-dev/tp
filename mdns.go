@@ -18,16 +18,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Service type _tp._tcp.local, one instance per machine and never one per paste.
-// Discovery only turns a host ID into a candidate address. A spoofed answer
-// leads to a PAKE that fails key confirmation, so mDNS is a hint and never an
-// authority.
+// Advertise one `_tp._tcp` instance per machine. mDNS maps a host ID to a candidate
+// address, PAKE authenticates the peer.
 //
-// Discovery is announcement driven rather than query driven. Announcing on a
-// timer costs one packet per machine per interval, which grows with the size of
-// the network. Everyone answering everyone's queries grows with its square: a
-// thousand machines asking every thirty seconds is thirty thousand packets a
-// second, and wifi carries multicast at its slowest rate.
+// Periodic announcements keep multicast traffic linear with the number of machines.
+// Query and response discovery approaches quadratic traffic and wifi carries multicast
+// at its slowest rate.
 const (
 	mdnsService = "_tp._tcp.local."
 	mdnsPort    = 5353
@@ -37,8 +33,7 @@ const (
 	mdnsTTL          = uint32(peerLifetime / time.Second)
 	browseWhenEmpty  = time.Minute
 
-	// Without a delay, one query puts a reply from every machine on the air in
-	// the same millisecond.
+	// Stagger replies so one query does not make every host transmit at once.
 	answerDelayFloor   = 20 * time.Millisecond
 	answerDelayCeiling = 120 * time.Millisecond
 	answerMinGap       = time.Second
@@ -49,16 +44,14 @@ const (
 	quietPeriod = 15 * time.Second
 )
 
-// startupBurst is when the first announcements and query go out. Repeating them
-// covers a dropped packet without waiting for announceInterval.
+// Repeat startup traffic to tolerate packet loss without waiting for the next
+// announcement interval.
 var startupBurst = []time.Duration{0, time.Second, 3 * time.Second}
 
 var mdnsGroup = net.IPv4(224, 0, 0, 251)
 
-// classFlush is ClassINET with the RFC 6762 cache flush bit, which applies to
-// records unique to one machine, meaning everything here except the shared
-// service PTR. Without it, other Bonjour caches keep a stale address after this
-// machine changes network.
+// classFlush sets the RFC 6762 cache flush bit for records owned by one machine.
+// The shared service PTR does not use it.
 const classFlush = dnsmessage.ClassINET | 0x8000
 
 type peer struct {
@@ -68,22 +61,15 @@ type peer struct {
 	LastSeen time.Time `json:"last_seen"`
 }
 
-// txtVersion is advertised so peers on an unsupported version are skipped rather
-// than dialled and failed. A network holds both versions during a rollout.
+// Advertise the wire version so incompatible peers are skipped before dialing.
 const txtVersion = "1"
 
 type peerTable struct {
 	mu sync.Mutex
 	m  map[string]peer
 
-	// packets counts inbound mDNS datagrams from other machines, and anyPackets
-	// counts every one including this machine's own.
-	//
-	// The diagnostic uses anyPackets, because a home network whose only mDNS
-	// speaker is this Mac is silent by nature: mDNSResponder answering our own
-	// query arrives from our own address, and counting only other machines makes
-	// a working socket look blocked. A socket that cannot receive multicast at
-	// all sees nothing, not even that.
+	// packets excludes local traffic, anyPackets includes it. Receiving our own
+	// mDNS traffic proves the multicast socket works even when no peers exist.
 	packets    atomic.Int64
 	anyPackets atomic.Int64
 	started    time.Time
@@ -131,8 +117,7 @@ func (t *peerTable) sweep() {
 	}
 }
 
-// diagnostic returns empty unless multicast is provably not arriving, which
-// otherwise reads as a bug in tp.
+// diagnostic waits through startup before reporting that no multicast arrived.
 func (t *peerTable) diagnostic() string {
 	if time.Since(t.started) < quietPeriod || t.anyPackets.Load() > 0 {
 		return ""
@@ -145,9 +130,8 @@ func (t *peerTable) diagnostic() string {
 		"enterprise wifi usually do. Run tp doctor for the full picture."
 }
 
-// listenMDNS binds port 5353 alongside mDNSResponder on macOS and Avahi on
-// Linux, which already hold it. SO_REUSEADDR and SO_REUSEPORT must both be set
-// before the group join or the bind fails.
+// mDNSResponder on macOS or Avahi on Linux may already own UDP 5353. Set SO_REUSEADDR and
+// SO_REUSEPORT before binding so tp can listen alongside them.
 func listenMDNS(ctx context.Context) (*ipv4.PacketConn, error) {
 	lc := net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error {
 		var setErr error
@@ -180,31 +164,27 @@ type responder struct {
 	target   string
 	hostname string
 
-	// joined tracks which interfaces the group has been joined on, keyed by
-	// name, so a refresh can tell what is new.
+	// Multicast memberships keyed by interface name.
 	joinedMu sync.Mutex
 	joined   map[string]bool
 
-	// SetMulticastInterface is per socket state, so sends must not overlap.
+	// SetMulticastInterface changes socket wide state, so serialize sends.
 	sendMu sync.Mutex
 
 	answerMu      sync.Mutex
 	answerPending bool
 	lastAnswer    time.Time
 
-	// legacyMu guards a token bucket for unicast replies. They go to whatever
-	// address the query claimed, UDP sources are forgeable, and the reply is
-	// larger than the question, which without a ceiling is a reflector.
+	// Rate limit legacy unicast replies. Their spoofable source and larger
+	// response would otherwise make this socket useful for reflection.
 	legacyMu     sync.Mutex
 	legacyBucket bucket
 
-	// onSend replaces the socket write in tests.
+	// onSend intercepts socket writes in tests.
 	onSend func([]byte)
 }
 
-// startMDNS returns a stop function that sends a goodbye and closes the socket.
-// It must run synchronously before the socket closes, or the goodbye never
-// leaves.
+// startMDNS returns a stop function that sends a goodbye before closing the socket.
 func startMDNS(ctx context.Context, d *daemon) (func(), error) {
 	noop := func() {}
 	conn, err := listenMDNS(ctx)
@@ -225,9 +205,8 @@ func startMDNS(ctx context.Context, d *daemon) (func(), error) {
 		target:   d.hostID + ".local.",
 		hostname: strings.TrimSuffix(name, ".local"),
 	}
-	// Joining fails when no interface is usable yet, which is normal on a
-	// machine that booted with its wifi off. netLoop calls networkChanged once
-	// one appears.
+	// Starting without a usable interface (machine that booted with its wifi off) is valid,
+	// netLoop retries after the network changes.
 	_ = r.syncGroups()
 	d.onNetChange = r.networkChanged
 	d.probe = r.query
@@ -237,16 +216,14 @@ func startMDNS(ctx context.Context, d *daemon) (func(), error) {
 	go r.browseLoop(ctx)
 
 	return func() {
-		// A goodbye drops this address from peer caches immediately, instead of
-		// leaving fetches to spend a dial timeout on it for peerLifetime.
+		// Remove this address from peer caches before closing the socket.
 		r.send(r.buildRecords(0))
 		_ = conn.Close()
 	}, nil
 }
 
-// syncGroups joins the multicast group on newly appeared interfaces and forgets
-// departed ones. No explicit leave is needed, since a vanished interface takes
-// its membership with it.
+// syncGroups joins new interfaces and forgets those that disappeared. A removed
+// interface takes its multicast membership with it.
 func (r *responder) syncGroups() error {
 	ifaces := r.daemon.net.interfaces()
 
@@ -277,8 +254,7 @@ func (r *responder) syncGroups() error {
 
 var errNoInterface = errors.New("no usable multicast interface")
 
-// networkChanged runs from netLoop after the usable interfaces change. The peer
-// table has already been cleared by then.
+// networkChanged runs after netLoop clears peers from the previous network.
 func (r *responder) networkChanged() {
 	if err := r.syncGroups(); err != nil {
 		return
@@ -287,13 +263,12 @@ func (r *responder) networkChanged() {
 	r.query()
 }
 
-// jitter spreads an interval over plus or minus a quarter, so machines that
-// booted together do not stay in lockstep.
+// jitter varies an interval by ±25% to keep hosts from transmitting in lockstep.
 func jitter(d time.Duration) time.Duration {
 	return d*3/4 + time.Duration(randIndex(int(d/2)))
 }
 
-// announceLoop carries discovery in steady state at one packet per interval.
+// announceLoop sends startup retries followed by periodic announcements.
 func (r *responder) announceLoop(ctx context.Context) {
 	for _, delay := range startupBurst {
 		if !sleep(ctx, delay) {
@@ -306,9 +281,7 @@ func (r *responder) announceLoop(ctx context.Context) {
 	}
 }
 
-// browseLoop queries at startup and after that only while the peer table is
-// empty, which is self limiting: a busy network never asks, and an empty one has
-// nobody to answer.
+// browseLoop queries during startup and later only when no peers are known.
 func (r *responder) browseLoop(ctx context.Context) {
 	for _, delay := range startupBurst {
 		if !sleep(ctx, delay) {
@@ -380,8 +353,8 @@ func (r *responder) answerQuestions(p *dnsmessage.Parser, src net.Addr) {
 		}
 		switch q.Name.String() {
 		case mdnsService, r.instance, r.target:
-			// A source port other than 5353 is a one shot legacy query whose
-			// sender is not on the group, so only a unicast reply reaches it.
+			// Legacy queries use an ephemeral source port and require a unicast
+			// response.
 			if legacy, ok := legacySource(src); ok {
 				if r.allowLegacy() {
 					r.sendTo(r.buildRecords(mdnsTTL), legacy)
@@ -408,8 +381,8 @@ func legacySource(src net.Addr) (*net.UDPAddr, bool) {
 	return udp, true
 }
 
-// learnPeers reads SRV, TXT and A records out of a response. Nothing here is
-// trusted beyond "try this address".
+// learnPeers extracts candidate addresses from SRV, TXT and A records. The
+// resulting identity is still authenticated by PAKE.
 func (r *responder) learnPeers(p *dnsmessage.Parser) {
 	if err := p.SkipAllQuestions(); err != nil {
 		return
@@ -427,9 +400,7 @@ func (r *responder) learnPeers(p *dnsmessage.Parser) {
 
 	found, addrs := collectInstances(rrs)
 
-	// Round(0) strips the monotonic reading so peer ages use the wall clock. The
-	// monotonic clock stops while a laptop is asleep, which would leave the
-	// table looking fresh on a network it has never seen.
+	// Strip the monotonic component so time spent asleep counts toward peer age.
 	now := time.Now().Round(0)
 	for id, e := range found {
 		if id == r.daemon.hostID || e.port == 0 {
@@ -455,26 +426,22 @@ func (r *responder) learnPeers(p *dnsmessage.Parser) {
 	}
 }
 
-// instance is one advertised service, assembled from records that may arrive in
-// any section of a response.
+// instance accumulates records for one advertised service.
 type instance struct {
 	port     uint16
 	target   string
 	hostname string
 	version  string
-	// leaving is set by a TTL of zero, which is a goodbye. The address is
-	// dropped now instead of leaving fetches to time out on it for peerLifetime.
+	// A zero TTL is a goodbye and removes the peer immediately.
 	leaving bool
 }
 
-// collectInstances groups records by service instance and collects the A
-// records their SRV targets point at.
+// collectInstances groups service records and indexes addresses by SRV target.
 func collectInstances(rrs []dnsmessage.Resource) (map[string]*instance, map[string]net.IP) {
 	found := make(map[string]*instance)
 	addrs := make(map[string]net.IP)
 
-	// entry returns the accumulator for an instance of this service, or nil for
-	// records belonging to any other service on the LAN.
+	// Ignore records belonging to other services.
 	entry := func(name string) *instance {
 		id, ok := strings.CutSuffix(name, "."+mdnsService)
 		if !ok || id == "" {
@@ -516,9 +483,8 @@ func readTXT(e *instance, txt []string) {
 	}
 }
 
-// scheduleAnswer replies after a random delay, folding every query arriving in
-// the meantime into that one reply and never answering more than once a
-// second.
+// scheduleAnswer coalesces queries behind a delayed reply and enforces a
+// one second minimum between answers.
 func (r *responder) scheduleAnswer() {
 	r.answerMu.Lock()
 	defer r.answerMu.Unlock()
@@ -539,8 +505,8 @@ func (r *responder) scheduleAnswer() {
 	})
 }
 
-// buildRecords builds this machine's announcement: one PTR, one SRV, one TXT and
-// one A per advertised address. A ttl of zero makes it a goodbye.
+// buildRecords creates this machine's PTR, SRV, TXT and address records. A zero
+// TTL turns the announcement into a goodbye.
 func (r *responder) buildRecords(ttl uint32) []byte {
 	header := func(name string, t dnsmessage.Type, class dnsmessage.Class) dnsmessage.ResourceHeader {
 		return dnsmessage.ResourceHeader{
@@ -554,8 +520,7 @@ func (r *responder) buildRecords(ttl uint32) []byte {
 		Header: dnsmessage.Header{Response: true, Authoritative: true},
 		Answers: []dnsmessage.Resource{
 			{
-				// Shared record, so no cache flush bit. Every machine has a PTR
-				// under this same name.
+				// The service PTR is shared by every host and must not flush peers.
 				Header: header(mdnsService, dnsmessage.TypePTR, dnsmessage.ClassINET),
 				Body:   &dnsmessage.PTRResource{PTR: dnsmessage.MustNewName(r.instance)},
 			},

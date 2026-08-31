@@ -8,16 +8,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
 )
-
-// doctor answers "why did discovery not find the other machine", which is
-// otherwise a guess between three unrelated causes: this network, WSL NAT, and
-// the macOS local network gate.
 
 type health struct {
 	Peers      []peer   `json:"peers"`
@@ -28,6 +23,7 @@ type health struct {
 	Interfaces []string `json:"interfaces"`
 }
 
+// cmdDoctor checks multicast reception and known platform specific discovery failures.
 func cmdDoctor(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
 	fix := fs.Bool("fix", false, "apply what this platform needs, where tp can do it itself")
@@ -58,17 +54,13 @@ func report(ctx context.Context) error {
 	fmt.Printf("interfaces:  %v\n", h.Interfaces)
 	fmt.Printf("mdns in:     %d packets, %d of them from other machines\n", h.AnyPackets, h.Packets)
 
-	// The daemon lists itself, so one peer means nobody else was heard.
+	// The first peer is always the local daemon.
 	others := len(h.Peers) - 1
 	fmt.Printf("peers:       %d\n", others)
 	for _, p := range h.Peers[1:] {
 		fmt.Printf("  %s  %s  %s\n", p.HostID, p.Hostname, p.Addr)
 	}
 
-	if launchAgentInstalled() {
-		fmt.Println("launch agent: present, and it stops the daemon being granted access")
-		fmt.Println("              remove it with tp doctor --fix")
-	}
 	if isWSL() {
 		mode := "mirrored"
 		if wslNAT(mustInterfaces()) {
@@ -99,8 +91,7 @@ func report(ctx context.Context) error {
 	return nil
 }
 
-// doctorFix does the part of the advice that is ours to do rather than yours.
-// Only macOS has one.
+// doctorFix applies fixes that do not require user action.
 func doctorFix(ctx context.Context, quiet bool) error {
 	if runtime.GOOS != osDarwin {
 		if !quiet {
@@ -113,20 +104,10 @@ func doctorFix(ctx context.Context, quiet bool) error {
 	return fixDarwin(ctx)
 }
 
-// fixDarwin gives tp a code signing identity, because that is what macOS 15 and
-// later records a local network decision against, and the Go linker signs every
-// binary as a.out. Then it restarts the daemon and asks, so the decision is made
-// against the new identity.
-//
-// The daemon is forked by the command and inherits the command's identity, so
-// signing the one binary covers both. An earlier version of this installed a
-// launch agent instead. That was wrong: a launchd job has no responsible app, so
-// its request is denied whatever the pane says, and the agent is removed here.
+// macOS 15 records local network permission against the binary's signing
+// identifier. Sign tp with a stable identifier before requesting access.
+// The child daemon inherits the CLI's identity.
 func fixDarwin(ctx context.Context) error {
-	if err := removeLegacyAgent(ctx); err != nil {
-		fmt.Fprintln(os.Stderr, "tp:", err)
-	}
-
 	self, err := os.Executable()
 	if err != nil {
 		return err
@@ -135,8 +116,7 @@ func fixDarwin(ctx context.Context) error {
 		return err
 	}
 
-	// The daemon holds the multicast socket, and the decision is evaluated when
-	// it joins, so the old one has to go before we ask.
+	// Restart so the daemon joins the multicast group under the new identity.
 	_ = exec.CommandContext(ctx, "pkill", "-f", "tp daemon").Run()
 
 	fmt.Printf("signed %s as %s\n", self, cliID)
@@ -150,8 +130,8 @@ func fixDarwin(ctx context.Context) error {
 	return nil
 }
 
-// cliID is the code signing identifier, and what shows up in Privacy and
-// Security. It has to be stable across upgrades or the decision is lost.
+// macOS stores local network permission against this identifier, so it must
+// remain stable across upgrades.
 const cliID = "sh.tp"
 
 func signSelf(ctx context.Context, bin string) error {
@@ -169,36 +149,8 @@ func signSelf(ctx context.Context, bin string) error {
 	return nil
 }
 
-// removeLegacyAgent undoes the launch agent that versions up to v0.0.2
-// installed. Leaving it in place is worse than having nothing: the daemon runs
-// under launchd, is denied local network access, and no pane toggle changes that.
-func removeLegacyAgent(ctx context.Context) error {
-	path := launchAgentPath()
-	if path == "" {
-		return nil
-	}
-	if !launchAgentInstalled() {
-		return nil
-	}
-
-	//nolint:gosec // Both arguments are constants.
-	_ = exec.CommandContext(ctx, "launchctl", "bootout", gui()+"/sh.tp.daemon").Run()
-	if err := os.Remove(path); err != nil {
-		return fmt.Errorf("removing the old launch agent at %s: %w", path, err)
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		_ = os.RemoveAll(filepath.Join(home, "Library", "Application Support", "tp"))
-	}
-	fmt.Println("removed the launch agent from an earlier version, which launchd could not be granted access for")
-	return nil
-}
-
-func gui() string { return fmt.Sprintf("gui/%d", os.Getuid()) }
-
-// watchMulticast joins the group in this process and reports every datagram,
-// which separates "the socket cannot receive" from "nobody else is talking".
-// A quiet home network with one machine on it is silent by nature, and the
-// daemon's own counter cannot tell the two apart.
+// watchMulticast listens directly to distinguish a blocked multicast socket
+// from a quiet network.
 func watchMulticast(ctx context.Context, d time.Duration) error {
 	ifaces, err := usableInterfaces()
 	if err != nil {
@@ -247,9 +199,8 @@ func watchMulticast(ctx context.Context, d time.Duration) error {
 	return ctx.Err()
 }
 
-// probeMulticast sends one mDNS query, which is the thing macOS gates. Sending
-// it from the command rather than the daemon is deliberate: a background agent's
-// request arrives as a notification, and a foreground process gets an alert.
+// Send the probe from the foreground process so macOS presents an access prompt
+// instead of a background notification.
 func probeMulticast() error {
 	msg := dnsmessage.Message{Questions: []dnsmessage.Question{{
 		Name:  dnsmessage.MustNewName(mdnsService),

@@ -8,17 +8,16 @@ import (
 	"time"
 )
 
-// Excluding virtual and tunnel interfaces avoids duplicate mDNS announcements
-// and keeps pastes off VPN links, which are outside the LAN scope.
+// Ignore virtual and tunnel interfaces to avoid duplicate mDNS announcements
+// and exposing pastes outside the local LAN.
 var excludedIfacePrefixes = []string{
 	"docker", "br-", "veth", "vboxnet", "tun", "utun", "wg", "awdl", "llw",
 }
 
 const ifaceRefresh = 20 * time.Second
 
-// netFilter is the set of interfaces tp will work on, both for mDNS and for
-// deciding which inbound connections to answer. The daemon outlives every
-// network a laptop joins, so the set is re-read on a timer.
+// netFilter tracks the interfaces allowed for mDNS and inbound data connections.
+// It is refreshed because the daemon may outlive the current network.
 type netFilter struct {
 	mu     sync.RWMutex
 	ifaces []net.Interface
@@ -31,7 +30,7 @@ func newNetFilter() *netFilter {
 	return f
 }
 
-// refresh reports whether the usable set changed.
+// refresh updates the filter when the usable IPv4 address set changes.
 func (f *netFilter) refresh() bool {
 	ifaces, _ := usableInterfaces()
 	addrs := make(map[string]bool, len(ifaces))
@@ -62,8 +61,7 @@ func (f *netFilter) isOwnAddr(ip string) bool {
 	return f.addrs[ip]
 }
 
-// serves reports whether a connection arriving on this local address should be
-// answered. Loopback always qualifies, so a machine can fetch its own paste.
+// serves accepts connections on selected interfaces and loopback.
 func (f *netFilter) serves(local net.Addr) bool {
 	host, _, err := net.SplitHostPort(local.String())
 	if err != nil {
@@ -99,8 +97,8 @@ func sameAddrs(a, b map[string]bool) bool {
 	return true
 }
 
-// usableInterfaces returns interfaces that are up, multicast capable, not
-// loopback, not excluded by name, and carrying a routable IPv4 address.
+// usableInterfaces returns multicast capable LAN interfaces with a usable IPv4
+// address.
 func usableInterfaces() ([]net.Interface, error) {
 	all, err := net.Interfaces()
 	if err != nil {

@@ -73,8 +73,7 @@ func TestCanonical(t *testing.T) {
 	}
 }
 
-// Whatever tp post prints has to derive the same password once tp get parses it
-// back, or a correctly typed code fails.
+// Codes printed by tp must round trip through the input parser unchanged.
 func TestGeneratedCodesAreCanonical(t *testing.T) {
 	for _, gen := range []struct {
 		name string

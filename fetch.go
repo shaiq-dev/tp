@@ -13,16 +13,16 @@ import (
 	"time"
 )
 
-// Each non holder spends one exchange against a scrypt hardened 31 bit password
-// and cannot retry offline, so trying many at once is safe as well as fast.
+// Each candidate gets one online PAKE attempt against the scrypt hardened
+// 31 bit code. Fan out does not create an offline guessing path.
 const (
 	minFanOut   = 8
 	maxFanOut   = 64
 	dialTimeout = 2 * time.Second
 )
 
-// fanOut keeps a small network cheap and stops a large one turning into a
-// queue. A 100 candidates eight at a time is 125 rounds of waiting.
+// Use enough concurrent connections to keep small networks quick without
+// flooding larger ones.
 func fanOut(candidates int) int {
 	return min(maxFanOut, max(minFanOut, candidates/4))
 }
@@ -44,12 +44,10 @@ func (e *pinMismatchError) Error() string {
 	return fmt.Sprintf("host %s presented key %s but %s is pinned, refusing to continue", e.hostID, e.got, e.want)
 }
 
-// fetch runs the PAKE against every candidate in parallel and returns the first
-// paste that comes back. Everyone else fails key confirmation and learns
-// nothing, down to whether they were the one being asked.
+// fetch tries candidates concurrently and returns the first authenticated paste.
+// Non holders learn only that PAKE confirmation failed.
 func fetch(ctx context.Context, prs []byte, cands []candidate) ([]byte, error) {
-	// Pinned hosts first. A previously fetched host is the likeliest holder and
-	// its certificate can be checked directly.
+	// Try pinned hosts first, a previous sender is more likely to hold the paste.
 	cands = slices.Clone(cands)
 	slices.SortStableFunc(cands, func(a, b candidate) int {
 		switch {
@@ -136,11 +134,10 @@ func fetchFrom(ctx context.Context, prs []byte, c candidate) ([]byte, error) {
 		return nil, err
 	}
 
-	// Pinning this machine would turn a regenerated identity key into a mismatch
-	// warning against itself.
+	// Do not pin the local daemon, a regenerated identity would look like a
+	// remote key change.
 	if !isLoopback(c.addr) {
-		// The paste is already in hand and the fetch has been counted, so a
-		// failed pin write cannot abort.
+		// TThe fetch has succeeded, so a pin cache failure is non fatal.
 		if err := savePin(serverID, pin{SPKI: spkiHash(leaf), Hostname: c.hostname}); err != nil {
 			fmt.Fprintln(os.Stderr, "tp: could not update the pin cache:", err)
 		}
@@ -157,17 +154,15 @@ func isLoopback(addr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// clientTLSConfig checks the pin when there is one. No CA is involved: TLS
-// supplies confidentiality and the exporter, and authentication comes from the
-// PAKE.
+// TLS provides encryption and channel binding, PAKE authenticates unpinned
+// peers, while recorded SPKI pins authenticate known hosts.
 //
-// The check hangs off VerifyConnection rather than VerifyPeerCertificate because
-// a resumed handshake carries no Certificate message and would skip the latter,
-// leaving the pin unenforced.
+// VerifyConnection also runs for resumed sessions, where VerifyPeerCertificate
+// may be skipped.
 func clientTLSConfig(c candidate) *tls.Config {
 	return &tls.Config{
 		MinVersion: tls.VersionTLS13,
-		//nolint:gosec // The PAKE authenticates the peer, so no CA is involved.
+		//nolint:gosec // Peer authentication is provided by PAKE or an SPKI pin.
 		InsecureSkipVerify: true,
 		NextProtos:         []string{alpnProto},
 		VerifyConnection: func(state tls.ConnectionState) error {
@@ -179,15 +174,14 @@ func clientTLSConfig(c candidate) *tls.Config {
 	}
 }
 
-// checkPin reports whether cert belongs to the host this candidate names and
-// whether its key still matches a recorded pin.
+// checkPin verifies that a pinned candidate still presents the expected host
+// identity and key.
 func (c candidate) checkPin(cert *x509.Certificate) error {
 	if c.pin == nil {
 		return nil
 	}
-	// The host ID is a hash of the key, so a certificate hashing to a different
-	// one is a different machine. Anyone on the LAN can advertise another host's
-	// ID, so this is a misdirected candidate rather than a rotated key.
+	// A host ID is derived from its key. A mismatch means discovery sent us to
+	// another machine, not that the pinned host rotated its key.
 	if hostID(cert.RawSubjectPublicKeyInfo) != c.hostID {
 		return errNoMatch
 	}
@@ -197,7 +191,7 @@ func (c candidate) checkPin(cert *x509.Certificate) error {
 	return nil
 }
 
-// exchange runs the four message PAKE and returns the decrypted paste.
+// exchange completes the four message PAKE and decrypts the returned paste.
 func exchange(conn *tls.Conn, prs []byte, serverID string) ([]byte, error) {
 	sid, err := channelBinding(conn)
 	if err != nil {
@@ -228,13 +222,9 @@ func exchange(conn *tls.Conn, prs []byte, serverID string) ([]byte, error) {
 	return side.open(sealed)
 }
 
-// matchOffer finds the paste this code belongs to and fills in the session key.
-// The server answered for every paste it holds and exactly one of those
-// confirmations can verify.
-//
-// Every candidate is scanned even after a match. Stopping early makes the gap
-// before the confirmation message scale with the matching index, a scalar
-// multiplication apiece, and that is visible to anyone watching packet timing.
+// matchOffer checks every server candidate and keeps the session key for the
+// matching paste. Scanning the full offer prevents response timing from leaking
+// the candidate's index.
 func matchOffer(side *pakeSide, sid, offer []byte) error {
 	if len(offer) < 2 {
 		return errProtocol
@@ -258,8 +248,7 @@ func matchOffer(side *pakeSide, sid, offer []byte) error {
 		}
 	}
 	if side.sk == nil {
-		// Not the holder. Hanging up without confirming leaves the peer's
-		// counters untouched.
+		// Do not confirm a non holder or charge any of its pastes.
 		return errNoMatch
 	}
 	return nil

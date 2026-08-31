@@ -27,8 +27,7 @@ const (
 	pakeTimeout = 10 * time.Second
 	maxConns    = 256
 
-	// An empty daemon still announces itself, so it stops. The next command
-	// starts another one.
+	// Empty daemons expire, commands restart them on demand.
 	idleTimeout = 30 * time.Minute
 
 	acceptRetryFloor   = 5 * time.Millisecond
@@ -36,9 +35,7 @@ const (
 
 	peerPollInterval = 25 * time.Millisecond
 
-	// peerWarmup is how long after start a daemon is still expecting its first
-	// answers. Past it an empty table means an empty network, and waiting would
-	// cost every fetch on a single machine.
+	// Allow time for the first peer announcements after startup.
 	peerWarmup = 5 * time.Second
 )
 
@@ -51,29 +48,27 @@ type daemon struct {
 	port    int
 	started time.Time
 
-	// onNetChange and probe are filled in by startMDNS. Both stay nil when mDNS
-	// fails to start, which leaves the daemon working without discovery.
+	// Set by startMDNS, nil when discovery is unavailable.
 	onNetChange func()
 	probe       func()
 
-	// lastUsed holds a Unix second, not a Time, so it fits an atomic.
+	// Stored as Unix seconds so updates remain atomic.
 	lastUsed atomic.Int64
 }
 
-func (d *daemon) touch() { d.lastUsed.Store(time.Now().Unix()) }
+func (d *daemon) touch() {
+	d.lastUsed.Store(time.Now().Unix())
+}
 
 func (d *daemon) idleFor() time.Duration {
 	return time.Duration(time.Now().Unix()-d.lastUsed.Load()) * time.Second
 }
 
-// shouldStop requires an empty store, so stopping cannot lose a paste that
-// someone is holding a code for.
+// Never stop while a retrievable paste remains in memory.
 func (d *daemon) shouldStop() bool {
 	return len(d.store.list()) == 0 && d.idleFor() > idleTimeout
 }
 
-// runDaemon brings up the control socket, the TLS data plane and mDNS, then
-// blocks until one of them fails.
 func runDaemon(ctx context.Context) error {
 	cert, err := loadIdentity()
 	if err != nil {
@@ -113,12 +108,11 @@ func runDaemon(ctx context.Context) error {
 	}
 	d.touch()
 
-	// sweepLoop cancels this when the daemon goes idle, so everything below
-	// unwinds on that as well as on the user's signal.
+	// sweepLoop cancels this context when an empty daemon times out.
 	ctx, stopIdle := context.WithCancel(ctx)
 	defer stopIdle()
 
-	// tp get --host works without discovery, so a failure here is not fatal.
+	// Direct fetches through --host do not depend on discovery.
 	stopMDNS, err := startMDNS(ctx, d)
 	if err != nil {
 		log.Printf("mdns: %v, tp get --host still works", err)
@@ -140,16 +134,14 @@ func runDaemon(ctx context.Context) error {
 	}
 }
 
-// netLoop re-reads the usable interfaces. It runs from the daemon rather than
-// from the responder because the data plane filters on the same set, and mDNS
-// may never have started on a machine that booted with its wifi off.
+// netLoop keeps discovery and data plane filtering in sync with interface
+// changes. It remains active even if mDNS failed to start.
 func (d *daemon) netLoop(ctx context.Context) {
 	for sleep(ctx, ifaceRefresh) {
 		if !d.net.refresh() {
 			continue
 		}
-		// Changed addresses mean a different network, where nothing learned on
-		// the old one is reachable.
+		// Peers learned on the previous network are no longer reachable.
 		d.peers.clear()
 		if d.onNetChange != nil {
 			d.onNetChange()
@@ -157,7 +149,6 @@ func (d *daemon) netLoop(ctx context.Context) {
 	}
 }
 
-// sleep reports false when ctx is cancelled before d elapses.
 func sleep(ctx context.Context, d time.Duration) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()
@@ -169,9 +160,9 @@ func sleep(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// listenData binds the fixed port, falling back to an ephemeral one published
-// through SRV when it is taken. Binding every interface is deliberate:
-// serveData refuses connections that did not arrive on one tp advertises on.
+// listenData binds the fixed port, but publishes an ephemeral one through SRV
+// when it is taken. serveData filters connections, so the listener can bind
+// every interface.
 func listenData(ctx context.Context, cfg *tls.Config) (net.Listener, error) {
 	var lc net.ListenConfig
 	for _, addr := range []string{fmt.Sprintf(":%d", dataPort), ":0"} {
@@ -211,18 +202,16 @@ func (d *daemon) sweepLoop(ctx context.Context, stop func()) {
 	}
 }
 
-// serveData accepts TLS connections and runs one PAKE exchange on each. Every
-// failure closes the connection identically, so a wrong code, a burned paste and
-// an absent paste are indistinguishable from outside.
+// serveData runs one PAKE exchange per TLS connection. All failures appear as
+// the same connection close to the peer.
 func (d *daemon) serveData(ctx context.Context, l net.Listener) error {
 	sem := make(chan struct{}, maxConns)
 	retry := acceptRetryFloor
 	for {
 		conn, err := l.Accept()
 		if err != nil {
-			// Go retries EINTR, EAGAIN and ECONNABORTED internally, so what
-			// reaches here is mostly descriptor exhaustion. Returning would
-			// unwind runDaemon and drop every paste held in memory.
+			// Go retries EINTR, EAGAIN and ECONNABORTED internally. Retry descriptor resource
+			// exhaustion rather than dropping the in memory store.
 			if ctx.Err() == nil && retryableAccept(err) {
 				if !sleep(ctx, retry) {
 					return ctx.Err()
@@ -234,8 +223,7 @@ func (d *daemon) serveData(ctx context.Context, l net.Listener) error {
 		}
 		retry = acceptRetryFloor
 
-		// The listener binds every interface, so without this pastes stay
-		// reachable over VPN and tunnel links that mDNS deliberately skips.
+		// Reject VPN and tunnel interfaces excluded from discovery.
 		if !d.net.serves(conn.LocalAddr()) {
 			_ = conn.Close()
 			continue
@@ -256,16 +244,14 @@ func (d *daemon) serveData(ctx context.Context, l net.Listener) error {
 				_ = conn.Close()
 				<-sem
 			}()
-			// Not logged. The error is derived from peer input and would tell
-			// the peer which step it failed at.
+			// Handshake failures are expected when no local paste matches.
 			_ = d.handshake(ctx, tlsConn)
 		}()
 	}
 }
 
-// buildOffer runs one CPace instance per candidate, a scalar multiplication
-// each and around 32 ms at the paste cap. The generator depends on the per
-// connection channel binding, so none of it can be precomputed.
+// Each candidate needs a fresh CPace exchange because its generator includes
+// the connection's channel binding. At the candidate limit this takes about 32 ms.
 func buildOffer(cands [][]byte, ci, sid, peerShare []byte) ([]*pakeSide, []byte, error) {
 	if len(cands) > maxCandidates {
 		return nil, nil, errProtocol
@@ -309,7 +295,7 @@ func (d *daemon) handshake(ctx context.Context, conn *tls.Conn) error {
 		return err
 	}
 
-	// The offer is the oracle, so a guess is counted here and not at accept.
+	// Count a guess only after sending an offer the client can test.
 	if !d.limiter.allowExchange() {
 		return errProtocol
 	}
@@ -323,8 +309,7 @@ func (d *daemon) handshake(ctx context.Context, conn *tls.Conn) error {
 		return err
 	}
 
-	// A client that verifies no server tag hangs up here, which is the normal
-	// outcome of a fan out reaching a host that holds nothing.
+	// During fan out, hosts without a matching paste normally disconnect here.
 	tag, err := readFrame(conn, macLen)
 	if err != nil {
 		return err
@@ -337,7 +322,7 @@ func (d *daemon) handshake(ctx context.Context, conn *tls.Conn) error {
 
 	body := d.store.take(cands[match])
 	if body == nil {
-		// A decoy, or a paste that expired mid handshake.
+		/// The candidate was a decoy or expired during the handshake.
 		return errProtocol
 	}
 	sealed, err := sides[match].seal(body)
@@ -349,8 +334,8 @@ func (d *daemon) handshake(ctx context.Context, conn *tls.Conn) error {
 	return writeFrame(conn, sealed)
 }
 
-// openExchange completes TLS, confirms the peer speaks this protocol, and
-// returns the channel binding the PAKE transcript is tied to.
+// openExchange completes TLS, checks ALPN and returns the channel binding used
+// by the PAKE transcript.
 func (d *daemon) openExchange(ctx context.Context, conn *tls.Conn) ([]byte, error) {
 	if err := conn.SetDeadline(time.Now().Add(pakeTimeout)); err != nil {
 		return nil, err
@@ -364,7 +349,7 @@ func (d *daemon) openExchange(ctx context.Context, conn *tls.Conn) ([]byte, erro
 	return channelBinding(conn)
 }
 
-// readHello returns the client's public share.
+// rreadHello validates the wire version and returns the client's public share.
 func readHello(conn *tls.Conn) ([]byte, error) {
 	hello, err := readFrame(conn, helloLen)
 	if err != nil {
@@ -376,10 +361,8 @@ func readHello(conn *tls.Conn) ([]byte, error) {
 	return hello[1:], nil
 }
 
-// matchConfirmation returns the index of the candidate the client's tag belongs
-// to, or a negative number for none. The client sends no index, since letting it
-// name one would let any peer aim a failed confirmation at a paste it knows
-// nothing about. The search runs in constant time so it leaks no index either.
+// The client cannot select a candidate directly. Scan every tag in constant time
+// to prevent targeted guesses and avoid leaking the matching index.
 func matchConfirmation(sides []*pakeSide, tag []byte) int {
 	if len(tag) != macLen {
 		return -1
@@ -458,8 +441,7 @@ func (d *daemon) handlePost(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInsufficientStorage)
 			return
 		}
-		// The only time the daemon holds the code. Only the derived password
-		// is stored.
+		// Do not retain the code, the store contains only its derived password.
 		writeJSON(w, map[string]any{"code": code, "expires_at": expires})
 		return
 	}
@@ -498,17 +480,14 @@ func (d *daemon) handleList(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-// handlePeers waits for the first announcements when the wait query parameter is
-// set. A daemon started by the calling command has an empty table for a few
-// hundred milliseconds, which otherwise reads as an empty network.
+// A newly started daemon may need a short wait for its first peer announcement.
 func (d *daemon) handlePeers(w http.ResponseWriter, r *http.Request) {
 	d.touch()
 	if wait, err := time.ParseDuration(r.URL.Query().Get("wait")); err == nil && wait > 0 {
 		d.waitForPeers(r.Context(), wait)
 	}
 
-	// This machine is a candidate for its own fetches, so posting and getting on
-	// one machine works without any peers at all.
+	// Include the local daemon so same machine fetches do not depend on discovery.
 	peers := append([]peer{{
 		HostID:   d.hostID,
 		Hostname: "this machine",
@@ -526,10 +505,8 @@ func (d *daemon) handlePeers(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// waitForPeers probes and waits only during warmup. A daemon up longer than
-// peerWarmup with an empty table is on an empty network, and a machine joining
-// later announces itself unsolicited, so waiting past that point would slow
-// every fetch for nothing.
+// Probe only during startup. Peers joining later announce themselves, so
+// waiting after warmup would delay every fetch on an empty network.
 func (d *daemon) waitForPeers(ctx context.Context, wait time.Duration) {
 	if len(d.peers.list()) > 0 || time.Since(d.started) > peerWarmup {
 		return
@@ -548,8 +525,6 @@ func (d *daemon) waitForPeers(ctx context.Context, wait time.Duration) {
 	}
 }
 
-// handleDelete takes the hex derived PAKE password, not the code. The CLI
-// derives it so a spoken code never crosses the control socket.
 func (d *daemon) handleDelete(w http.ResponseWriter, r *http.Request) {
 	d.touch()
 	prs, err := hex.DecodeString(r.PathValue("prs"))
@@ -573,9 +548,8 @@ func writeJSON(w http.ResponseWriter, v any) {
 	}
 }
 
-// listenControl binds the unix socket. Permissions that would admit another
-// local user abort the daemon rather than being corrected, since by then the
-// socket has already been exposed.
+// Refuse a runtime directory accessible to other users before creating the
+// control socket.
 func listenControl(ctx context.Context) (net.Listener, error) {
 	path, err := sockPath()
 	if err != nil {
@@ -628,8 +602,7 @@ func xdgDir(env string, fallback ...string) (string, error) {
 	return dir, os.MkdirAll(dir, 0o700)
 }
 
-// xdgPath is xdgDir without the side effect, for code that wants to know where
-// something would be rather than to use it.
+// xdgPath returns the location without creating it.
 func xdgPath(env string, fallback ...string) (string, error) {
 	dir := os.Getenv(env)
 	if dir == "" {

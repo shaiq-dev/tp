@@ -1,8 +1,3 @@
-# tp build. Cross building and packaging live in scripts/, since both are shell
-# loops that read badly as make recipes and are useful to run on their own.
-# Everything else is short enough to stay here. Needs only Go and a POSIX shell,
-# and works with the GNU Make 3.81 that ships with macOS.
-
 BIN     := tp
 DIST    := dist
 PREFIX  ?= $(HOME)/.local
@@ -59,9 +54,7 @@ lint-fix:
 fmt:
 	go tool golangci-lint fmt ./...
 
-# golangci-lint is pinned as a module tool so every machine runs the same
-# version. govulncheck is fetched on demand because it only reports and has
-# nothing to pin against.
+# golangci-lint is pinned as a module tool for reproducible checks.
 .PHONY: check
 check:
 	@test -z "$$(gofmt -l .)" || { echo "gofmt needed:" >&2; gofmt -l . >&2; exit 1; }

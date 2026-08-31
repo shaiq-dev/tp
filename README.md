@@ -1,124 +1,142 @@
 # tp, terminal paste
 
-Share a paste with the machine next to you. No server, no account, no internet.
+Share a paste with another machine on the same network. No server, account, or internet connection required. The sender keeps the paste in memory and serves it directly to the receiving machine. Stopping the daemon or rebooting the sender destroys it.
 
-```
-$ tp post notes.txt
+```bash
+tp post notes.txt  # echo "Terminal Paste" | tp post
 otter-piano-cobalt
 
-$ tp get otter-piano-cobalt      # on the other machine
+tp get otter-piano-cobalt      # on the other machine
 ```
 
-The paste lives in the sender's process memory and is served straight to the
-fetcher over TLS. Process exit or reboot destroys everything.
 
 ## Install
 
-```
+```bash
 curl -fsSL https://raw.githubusercontent.com/shaiq-dev/tp/main/install.sh | sh
 ```
 
-Needs nothing but `curl` and `tar`. Downloads are checked against a SHA-256 from
-the release manifest. It installs to `~/.local/bin/tp`, never uses `sudo`, and
-does not touch your shell rc files.
+<br />
+The installer downloads the latest release archive to `~/.local/bin/tp`. It does not use sudo or modify shell startup files. Set `TP_VERSION` to install a specific release or `TP_PREFIX` to choose another location:
 
-Pick a version or a location with `TP_VERSION=v0.1.0` and `TP_PREFIX=/opt/tp`.
-
-Or skip the script:
-
-```
-go install github.com/shaiq-dev/tp@latest          # needs Go 1.26.6+
-make install                                        # from a checkout
+```bash
+curl -fsSL https://raw.githubusercontent.com/shaiq-dev/tp/main/install.sh | TP_VERSION=v0.1.0 sh
+curl -fsSL https://raw.githubusercontent.com/shaiq-dev/tp/main/install.sh | TP_PREFIX=/opt/tp sh
 ```
 
-Prebuilt tarballs and a `SHA256SUMS` file are attached to every
-[release](https://github.com/shaiq-dev/tp/releases).
+<br />
+You can also install from source:
+
+```go
+go install github.com/shaiq-dev/tp@latest
+```
+
+<br />
+Prebuilt tarballs and a `SHA256SUMS` file are attached to every [release](https://github.com/shaiq-dev/tp/releases).
+
 
 ## Supported platforms
 
 | OS | Architectures |
 |---|---|
-| macOS 12 Monterey and later | `amd64`, `arm64` |
-| Linux, kernel 3.2 and later | `amd64`, `arm64`, `armv7`, `386` |
+| macOS 12 Monterey or later | `amd64`, `arm64` |
+| Linux, kernel 3.2 or later | `amd64`, `arm64`, `armv7`, `386` |
 
-Binaries are built with `CGO_ENABLED=0`, so they are static and do not depend on
-glibc, musl or any distro version. Both machines need to be on the same network,
-not on the same OS.
+Release builds use `CGO_ENABLED=0`. Linux binaries do not depend on glibc, musl, or a particular distribution.
+
+
+## Usage
+
+| Command | Description |
+| --- | --- |
+| `tp post [file]` | Read a file or standard input and print its code |
+| `tp get <code>` | Fetch a paste and write it to standard output |
+| `tp list` | List pastes served by this machine |
+| `tp del <code>` | Stop serving a paste |
+| `tp doctor` | Diagnose discovery and local network problems |
+| `tp uninstall` | Remove tp and its local data |
+| `tp completion <shell>` | Generate completion for Bash, Zsh, or Fish |
+| `tp version` | Build and platform information |
+
+Useful posting options:
+
+```sh
+tp post --label notes --ttl 30m notes.txt
+tp post --burn secret.txt
+tp post --max-gets 3 archive.tar.gz
+tp post --code-style=digits notes.txt
+```
+
+Use `--host` when you know the sender's address and want to bypass discovery:
+
+```sh
+tp get --host 192.168.1.20 otter-piano-cobalt
+```
+
+Word codes accept any unambiguous prefix, so this works too:
+
+```sh
+tp get otte-pian-coba
+```
+
+
+## How it works and security
+
+1. `tp post` generates a three word code with about 31 bits of entropy, then derives a PAKE secret using scrypt. Each derivation uses roughly 32 MiB of memory, and the code itself is not retained.
+2. Machines advertise candidate addresses over mDNS. These records are untrusted, a spoofed peer still has to complete PAKE key confirmation.
+3. The receiver connects over TLS 1.3 and runs CPace over ristretto255. The code is never sent, and a wrong code produces nothing useful for offline guessing.
+4. The sender returns a padded, shuffled set of confirmations because it cannot tell which stored paste the code identifies. Padding hides the exact number of live pastes.
+5. After mutual confirmation, the payload is encrypted with a key derived from the PAKE session, in addition to TLS. Successful peers are pinned so later key changes are not silently accepted.
+
+Each source address is limited to 20 connection attempts per minute. A global bucket limits testable guesses to 10 per second even when source addresses are rotated.
+
+Pastes and derived PAKE secrets remain in the daemon's memory. Anyone who can read that process should be considered to have access to them, tp protects the network transfer, not a compromised endpoint.
+
+
+## Discovery
+
+Discovery uses IPv4 multicast and expects both machines to be on the same LAN. If no peer appears, run `tp doctor` or `tp doctor --listen 10s`.
+
+Common blockers:
+
+- **Guest, hotel, and enterprise Wi-Fi** often isolate clients or block multicast.
+- **macOS 15 or later** requires Local Network permission for tp's signing identity. Run `tp doctor --fix`, or enable tp under **System Settings > Privacy & Security > Local Network**.
+- **WSL2 NAT mode** does not pass multicast to the LAN. Set `networkingMode=mirrored` under `[wsl2]` in `%UserProfile%\.wslconfig`, then run `wsl --shutdown`.
+
+## Daemon lifecycle
+
+The CLI starts the daemon automatically when its control socket is absent. The daemon stops after its store is empty and it has been idle for 30 minutes.
+
+An optional systemd user service is included in `contrib/tp.service` for users who prefer systemd to manage the daemon.
+
+## Uninstall
+
+```sh
+tp uninstall
+```
+On macOS, the Local Network entry remains visible in System Settings but is inert after the binary is removed.
+
 
 ## Building
 
-```
-make build     # ./tp for this machine
-make test      # go test -race
-make check     # everything CI runs
-make lint      # golangci-lint on its own
-make dist      # every platform, tarballs, checksums and manifest into dist/
-```
-
-Nothing beyond Go and a POSIX shell is required, and `make help` lists the rest.
-Cross building lives in `scripts/` and runs without make, so
-`VERSION=v0.1.0 scripts/build.sh` does the same thing as `make dist`.
-
-## Commands
-
-```
-tp post [file]     read stdin or file, return a code
-tp get <code>      fetch a paste to stdout
-tp list            list pastes this machine is serving
-tp del <code>      stop serving a paste
+```sh
+make build     # Build ./tp for this machine
+make test      # Run tests with the race detector
+make lint      # Run golangci-lint
+make check     # Run all CI checks
+make dist      # Build release archives, checksums, and manifest
 ```
 
-`tp post` takes `--label`, `--ttl`, `--max-gets`, `--burn` and
-`--code-style=digits`. `tp get` takes `--host` to skip discovery.
+The build requires Go, a POSIX shell, and GNU Make 3.81 or later. Run `make help` for the complete target list.
 
-Codes accept unambiguous abbreviations: `tp get otte-pian-coba` works.
+Cross compilation and packaging can also run without Make:
 
-## How the code stays safe
-
-The code is short enough to say across a desk, which caps it at about 31 bits.
-That is far too little to send over a hostile network, so it is never sent, in
-any form. Both sides run a balanced PAKE (CPace over ristretto255) with the code
-as the password, bound to the TLS channel. A hostile node on your wifi gets one
-guess per connection, rate limited to 20 a minute, and learns nothing it can
-attack offline.
-
-## Things that are expected, not bugs
-
-- **A suspended laptop stops serving.** The paste is in memory on the sender.
-  Nothing to fix; wake it up.
-- **Guest, hotel and enterprise wifi usually block client-to-client traffic**
-  and drop multicast. `tp` cannot work there. It detects this at startup and
-  says so rather than failing silently.
-- **macOS 15+ gates local network access per code signing identity.** The Go
-  linker ad-hoc signs every binary as `a.out`, so an unsigned `tp` shares an
-  identity with every other Go program on the machine and there is nothing
-  meaningful to grant. The installer re-signs the binary as `sh.tp`, and the
-  daemon is forked by the command so it inherits that identity. Allow `tp` when
-  asked, or in System Settings, Privacy and Security, Local Network. `tccutil`
-  has no `LocalNetwork` service, so the pane is the only place to change it.
-  Run `tp doctor --fix` to re-sign, restart the daemon and ask again.
-
-  A launch agent does not work for this. A launchd job has no responsible app,
-  so it is denied whatever the pane says. Versions up to v0.0.2 installed one;
-  `tp doctor --fix` removes it.
-- **WSL2 in its default NAT mode cannot discover anything.** The VM is behind a
-  virtual switch, so multicast never reaches the LAN in either direction. Set
-  `networkingMode=mirrored` in `%UserProfile%\.wslconfig` and `wsl --shutdown`.
-  The installer detects NAT mode and says so.
-- **The macOS firewall may prompt** on the first inbound connection.
-
-`tp uninstall` removes the binary, everything stored under XDG, and any launch
-agent left by an older version. It prints the list first and asks, or takes
-`--yes`.
-
-When discovery finds nothing, `tp doctor` prints what the daemon is seeing:
-which interfaces it joined, how many mDNS packets have arrived, which peers it
-knows, and the fix for whichever of the above applies. `tp doctor --listen 10s`
-joins the group in the foreground and reports every datagram and its source,
-which separates a socket that cannot receive from a network where nobody else is
-talking. On a home network with one machine on it, the only source will be that
-machine, and that is not a fault.
+```sh
+VERSION=v0.1.0 scripts/build.sh
+```
 
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE)
+
+

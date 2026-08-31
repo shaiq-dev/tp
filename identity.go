@@ -17,15 +17,14 @@ import (
 	"time"
 )
 
-// crockford is base32 without I, L, O and U, so a host ID reads aloud without
-// ambiguity.
+// https://www.crockford.com/base32.html
 var crockford = base32.NewEncoding("0123456789ABCDEFGHJKMNPQRSTVWXYZ").WithPadding(base32.NoPadding)
 
 const hostIDLen = 12
 
-// loadIdentity returns this machine's long lived self signed certificate,
-// generating the Ed25519 key on first run. Only the public key it carries is
-// trusted. Subject, issuer and validity are ignored by both peers.
+// loadIdentity loads the machine's Ed25519 key, creating it on first use, and
+// wraps it in a self signed certificate. Peers trust the key, not the
+// certificate metadata.
 func loadIdentity() (tls.Certificate, error) {
 	dir, err := dataDir()
 	if err != nil {
@@ -63,13 +62,12 @@ func loadOrCreateKey(path string) (ed25519.PrivateKey, error) {
 	case err != nil:
 		return nil, err
 	}
-	// Tightening the mode here would hide the fact that a readable key may
-	// already have been copied.
+	// Do not repair the permissions, the key may already have been exposed.
 	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
 		return nil, fmt.Errorf("%s: permissions are %04o, want 0600. Delete it to start over with a new identity", path, perm)
 	}
 
-	pemKey, err := os.ReadFile(path) //nolint:gosec // path is built from the user's own XDG directory.
+	pemKey, err := os.ReadFile(path) //nolint:gosec // path is within the user's XDG data directory.
 	if err != nil {
 		return nil, err
 	}
@@ -104,8 +102,8 @@ func createKey(path string) (ed25519.PrivateKey, error) {
 	return priv, nil
 }
 
-// hostID is Crockford base32 of SHA-256(SPKI) truncated to 12 characters. It
-// names a machine in mDNS and in the pin cache, and never appears in a code.
+// hostID is the first 12 Crockford base32 characters of SHA-256(SPKI). It
+// identifies a machine in mDNS and the pin cache, but is not part of its code.
 func hostID(spki []byte) string {
 	sum := sha256.Sum256(spki)
 	return crockford.EncodeToString(sum[:])[:hostIDLen]

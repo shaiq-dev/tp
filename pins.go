@@ -10,8 +10,8 @@ import (
 	"strings"
 )
 
-// A pin lets a later fetch try one host first and check its certificate
-// directly, skipping the fan out. A mismatch aborts rather than falling back.
+// A pin records the SPKI after a PAKE authenticated fetch. Later fetches
+// prioritize that host and detect unexpected key changes.
 type pin struct {
 	SPKI     string
 	Hostname string
@@ -35,15 +35,15 @@ func loadPins() map[string]pin {
 	return pins
 }
 
-// readPins also reports the line count, which savePin uses to decide when
-// appended history outweighs the entries.
+// readPins returns the physical line count so savePin knows when duplicate
+// history needs compaction.
 func readPins() (map[string]pin, int) {
 	pins := make(map[string]pin)
 	path, err := knownHostsPath()
 	if err != nil {
 		return pins, 0
 	}
-	b, err := os.ReadFile(path) //nolint:gosec // path is built from the user's own XDG directory.
+	b, err := os.ReadFile(path) //nolint:gosec // path is within the user's XDG data directory.
 	if err != nil {
 		return pins, 0
 	}
@@ -58,15 +58,14 @@ func readPins() (map[string]pin, int) {
 		if len(fields) > 2 {
 			p.Hostname = fields[2]
 		}
-		// Later lines win, resolving the duplicates that appending leaves.
+		// Appends may duplicate host IDs, the newest entry wins.
 		pins[fields[0]] = p
 	}
 	return pins, lines
 }
 
-// savePin appends rather than rewriting, so two fetches running at once cannot
-// drop each other's entries. Duplicates resolve on read and the file is
-// compacted once history outweighs entries.
+// savePin appends updates to avoid lost writes between concurrent fetches. Duplicates
+// are resolved on read and compacted once stale history outweighs live entries.
 func savePin(hostID string, p pin) error {
 	pins, lines := readPins()
 	if old, ok := pins[hostID]; ok && old == p {
@@ -81,7 +80,7 @@ func savePin(hostID string, p pin) error {
 		return writePins(path, pins)
 	}
 
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600) //nolint:gosec // path is built from the user's own XDG directory.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600) //nolint:gosec // path is within the user's XDG data directory.
 	if err != nil {
 		return err
 	}
@@ -97,8 +96,8 @@ func writePins(path string, pins map[string]pin) error {
 	for id, p := range pins {
 		fmt.Fprintf(&b, "%s %s %s\n", id, p.SPKI, p.Hostname)
 	}
-	// A fixed temp name would collide with another tp running concurrently,
-	// leaving each to read the other's half written file.
+	// Use a unique temporary file so concurrent compactions never share partial
+	// output.
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".known_hosts-*")
 	if err != nil {
 		return err

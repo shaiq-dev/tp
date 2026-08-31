@@ -12,9 +12,8 @@ import (
 	"strings"
 )
 
-// Uninstalling is more than deleting a binary now: the macOS fix leaves a launch
-// agent and a signed bundle behind, and pastes and pins live under XDG. Listing
-// those paths in a README is how one gets missed.
+// Uninstall removes the current executable and tp's data and runtime
+// directories.
 func cmdUninstall(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("uninstall", flag.ExitOnError)
 	yes := fs.Bool("yes", false, "do not ask")
@@ -40,9 +39,8 @@ func cmdUninstall(ctx context.Context, args []string) error {
 
 	fmt.Println("done")
 	if runtime.GOOS == osDarwin {
-		// Nothing removes a single entry. tccutil has no LocalNetwork service at
-		// all: tccd answers "Service name is invalid on this platform". The pane
-		// only toggles, and the store is a keyed archive nehelper holds open.
+		// macOS has no supported way to remove one Local Network permission
+		// entry, tccutil does not expose this service.
 		fmt.Println("The Local Network entry for tp stays in System Settings. Nothing removes")
 		fmt.Println("one: the pane only toggles, and tccutil has no LocalNetwork service. It")
 		fmt.Println("is inert now the binary is gone.")
@@ -50,8 +48,8 @@ func cmdUninstall(ctx context.Context, args []string) error {
 	return nil
 }
 
-// uninstallTargets is every path tp creates, in the order they are safe to
-// remove. Paths that do not exist are harmless to include.
+// uninstallTargets returns every path removed by uninstall. Missing paths are
+// safe to pass to RemoveAll.
 func uninstallTargets() []string {
 	var out []string
 	if self, err := os.Executable(); err == nil {
@@ -66,22 +64,10 @@ func uninstallTargets() []string {
 	if state, err := xdgPath("XDG_RUNTIME_DIR", ".local", "state"); err == nil {
 		out = append(out, state)
 	}
-	if runtime.GOOS == osDarwin {
-		if p := launchAgentPath(); p != "" {
-			out = append(out, p)
-		}
-		if home, err := os.UserHomeDir(); err == nil {
-			out = append(out, filepath.Join(home, "Library", "Application Support", "tp"))
-		}
-	}
 	return out
 }
 
 func stopDaemon(ctx context.Context) {
-	if runtime.GOOS == osDarwin {
-		//nolint:gosec // Both arguments are constants.
-		_ = exec.CommandContext(ctx, "launchctl", "bootout", gui()+"/sh.tp.daemon").Run()
-	}
 	_ = exec.CommandContext(ctx, "pkill", "-f", "tp daemon").Run()
 }
 

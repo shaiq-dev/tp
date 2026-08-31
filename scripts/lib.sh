@@ -1,12 +1,11 @@
 # shellcheck shell=sh
-# Shared settings and helpers. Sourced by the other scripts here, not run.
 
 BIN="${BIN:-tp}"
 DIST="${DIST:-dist}"
 VERSION="${VERSION:-dev}"
 
-# One tarball per platform. CGO is off everywhere, so the binaries are static
-# and do not care which libc or distro version the target has.
+# One archive per target. Builds disable CGO, avoiding target libc dependencies
+# on Linux.
 PLATFORMS="${PLATFORMS:-darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 linux/386 linux/arm}"
 
 die() { echo "${0##*/}: $*" >&2; exit 1; }
@@ -17,8 +16,7 @@ else
   sha256() { shasum -a 256 "$@"; }
 fi
 
-# goarm and dist_arch translate a Go GOARCH into the name used in file names.
-# Only 32 bit arm needs the distinction.
+# Map Go's 32-bit arm target to GOARM=7 and the armv7 archive suffix.
 goarm() {
   if [ "$1" = arm ]; then echo 7; fi
 }

@@ -9,8 +9,8 @@ import (
 	"testing"
 )
 
-// controlServer exercises the control plane over a real HTTP connection, with no
-// unix socket and no forked daemon.
+// controlServer runs control handlers over HTTP without starting a Unix socket
+// or daemon process.
 type controlServer struct{ url string }
 
 func newControlServer(t *testing.T, d *daemon) controlServer {

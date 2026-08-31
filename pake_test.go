@@ -11,8 +11,8 @@ import (
 	"github.com/gtank/ristretto255"
 )
 
-// Test vector for CPace with group G_Coffee25519 (ristretto255) and SHA-512,
-// copied verbatim from cfrg/draft-irtf-cfrg-cpace testvectors.json.
+// CPace reference vector for G_Coffee25519 (ristretto255) with SHA-512, copied
+// verbatim from cfrg/draft-irtf-cfrg-cpace testvectors.json.
 //
 //go:embed testdata/cpace_ristretto255.json
 var cpaceVectorJSON []byte
@@ -57,9 +57,8 @@ func TestCPaceReferenceVector(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The vector carries associated data and tp sends none, so this recomputes
-	// the transcript inline rather than calling sessionKey, which hardcodes the
-	// empty case.
+	// The reference vector includes associated data, while tp does not. Build
+	// the transcript here because sessionKey handles only empty AD.
 	transcript := oCat(lvCat(v["Ya"], v["ADa"]), lvCat(v["Yb"], v["ADb"]))
 	iskInput := append(lvCat([]byte(cpaceDSIISK), v["sid"], v["K"]), transcript...)
 	iskSum := sha512.Sum512(iskInput)
@@ -142,8 +141,8 @@ func TestScalarMultVfyRejectsBadPoints(t *testing.T) {
 	}
 }
 
-// The property the whole design rests on. The same password confirms and a
-// different one does not.
+// Matching passwords must produce the same confirmation tag, different
+// passwords must not.
 func TestPakeConfirmation(t *testing.T) {
 	right, err := derivePRS("acid-acorn-acre")
 	if err != nil {
@@ -180,8 +179,8 @@ func TestPakeConfirmation(t *testing.T) {
 	}
 }
 
-// The relay defence. The same password on two connections must not produce the
-// same session key, or an exchange could be forwarded between them.
+// Channel binding must prevent a confirmation tag from being reused across TLS
+// connections.
 func TestChannelBindingSeparatesSessions(t *testing.T) {
 	prs, err := derivePRS("acid-acorn-acre")
 	if err != nil {

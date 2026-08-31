@@ -1,8 +1,9 @@
 #!/bin/sh
-# Write manifest.json for whatever tarballs are already in $DIST.
 #
-# One flat line per target, so install.sh can read it with grep and sed instead
-# of shipping a JSON parser.
+# Generate manifest.json from the release archives already in $DIST.
+#
+# Keep each target entry on one line so install.sh can extract fields with grep
+# and sed without requiring a JSON parser.
 set -eu
 cd "$(dirname "$0")/.."
 . scripts/lib.sh

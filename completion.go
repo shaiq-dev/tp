@@ -5,8 +5,6 @@ import (
 	"fmt"
 )
 
-// Static completions. Pastes have no index route and codes
-// never reach the daemon in a readable form.
 const (
 	bashCompletion = `_tp() {
   local cmds="post get list del doctor uninstall completion version"

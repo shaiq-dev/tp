@@ -19,7 +19,7 @@ func TestPinRoundTrip(t *testing.T) {
 		t.Errorf("loadPins = %+v, want %+v", got, first)
 	}
 
-	// A rotated key appends a line, and the newer one wins on read.
+	// A replacement entry for the same host ID wins on the next read.
 	second := pin{SPKI: "bbbb", Hostname: "laptop"}
 	if err := savePin("HOST1", second); err != nil {
 		t.Fatal(err)
@@ -29,9 +29,8 @@ func TestPinRoundTrip(t *testing.T) {
 	}
 }
 
-// Anyone on the LAN can advertise someone else's host ID. That has to drop the
-// candidate quietly, since a pin mismatch tells the user their peer's key
-// changed.
+// A peer can advertise another machine's host ID. Treat a certificate that
+// disagrees with that ID as a bad discovery result, not a key change warning.
 func TestSpoofedHostIDIsNotAPinMismatch(t *testing.T) {
 	d, addr := newTestDaemon(t)
 	prs := addTestPaste(t, d, "acid-acorn-acre", "hello")

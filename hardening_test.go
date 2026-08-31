@@ -17,14 +17,13 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 )
 
-// Per IP limits do not bound guessing on a LAN, where an attacker assigns itself
-// as many addresses as the subnet holds.
+// Per IP limits cannot bound guessing when an attacker can rotate through LAN
+// addresses. The global bucket must enforce the total burst.
 func TestGlobalRateLimit(t *testing.T) {
 	l := newLimiter()
 	allowed := 0
 	for i := range globalBurst * 4 {
-		// A different source every time, which is all it takes to defeat a per
-		// IP bucket.
+		// Use a fresh source for each attempt to bypass per IP buckets.
 		if l.allowPeer("10.0.0."+strconv.Itoa(i%256)) && l.allowExchange() {
 			allowed++
 		}
@@ -34,8 +33,8 @@ func TestGlobalRateLimit(t *testing.T) {
 	}
 }
 
-// Charging the global bucket at accept let a bare TCP flood, which tests no
-// password at all, deny service to everyone.
+// Regression: charging the global bucket at TCP accept allowed connection only
+// floods to exhaust the guessing budget.
 func TestCheapFloodDoesNotDrainTheSharedBudget(t *testing.T) {
 	l := newLimiter()
 	for i := range 10 * globalBurst {
@@ -69,9 +68,8 @@ func TestPerIPLimitStillApplies(t *testing.T) {
 	}
 }
 
-// An attacker using a fresh source address per attempt, so only the global
-// bucket applies. Without it a daemon served 3508 guesses a second, which walks
-// the 2^31 keyspace in days.
+// Simulate source address rotation so only the global limit can bound guesses.
+// Without it a daemon served 3508 guesses a second, which walks the 2^31 keyspace in days.
 func TestGuessRateIsGloballyBounded(t *testing.T) {
 	if testing.Short() {
 		t.Skip("hammers a daemon for a few seconds")
@@ -84,7 +82,7 @@ func TestGuessRateIsGloballyBounded(t *testing.T) {
 		for rotate.Err() == nil {
 			time.Sleep(5 * time.Millisecond)
 			d.limiter.mu.Lock()
-			clear(d.limiter.ip) // stands in for rotating source addresses
+			clear(d.limiter.ip) //  Simulate a fresh source address.
 			d.limiter.mu.Unlock()
 		}
 	}()
@@ -112,7 +110,7 @@ func TestGuessRateIsGloballyBounded(t *testing.T) {
 	wg.Wait()
 	elapsed := time.Since(start)
 
-	// The burst is spent once, leaving the sustained rate.
+	// Account for the initial burst followed by the sustained rate.
 	allowed := float64(globalBurst) + globalPerSecond*elapsed.Seconds()
 	got := float64(served.Load())
 	t.Logf("%.0f guesses served in %v, ceiling %.0f", got, elapsed.Round(time.Millisecond), allowed)
@@ -123,8 +121,7 @@ func TestGuessRateIsGloballyBounded(t *testing.T) {
 	}
 }
 
-// oracleReached reports whether the daemon produced an offer, which is what
-// makes one connection worth one password guess.
+// oracleReached reports whether the server returned a testable PAKE offer.
 func oracleReached(ctx context.Context, addr string, prs []byte) bool {
 	raw, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 	if err != nil {
@@ -192,8 +189,8 @@ func TestSealedPayload(t *testing.T) {
 	}
 }
 
-// A peer that cannot name the protocol is turned away in the TLS handshake
-// rather than partway through an exchange.
+// Peers must negotiate the tp protocol through ALPN before sending application
+// frames.
 func TestALPNRequired(t *testing.T) {
 	_, addr := newTestDaemon(t)
 	raw, err := net.Dial("tcp", addr)
@@ -204,7 +201,7 @@ func TestALPNRequired(t *testing.T) {
 
 	conn := tls.Client(raw, &tls.Config{MinVersion: tls.VersionTLS13, InsecureSkipVerify: true})
 	if err := conn.HandshakeContext(t.Context()); err != nil {
-		return // rejected outright, which is fine
+		return // Rejection during TLS is the expected outcome.
 	}
 	conn.SetDeadline(time.Now().Add(pakeTimeout))
 	if err := writeFrame(conn, make([]byte, helloLen)); err != nil {
@@ -215,9 +212,8 @@ func TestALPNRequired(t *testing.T) {
 	}
 }
 
-// Regression for a cold tp get. A daemon forked by the calling command has an
-// empty peer table for a few hundred milliseconds, and a fetch that does not
-// wait it out reports an empty network.
+// Regression: a newly forked daemon has an empty peer table until its first
+// announcements arrive. A cold fetch must wait through that window.
 func TestColdGetWaitsForDiscovery(t *testing.T) {
 	d, _ := newTestDaemon(t)
 	srv := newControlServer(t, d)
@@ -228,7 +224,7 @@ func TestColdGetWaitsForDiscovery(t *testing.T) {
 		case probed <- struct{}{}:
 		default:
 		}
-		// Stands in for an announcement arriving a moment after the query.
+		// Simulate an announcement arriving shortly after the query.
 		time.AfterFunc(50*time.Millisecond, func() {
 			d.peers.put(peer{HostID: "PEER12345678", Addr: "10.0.0.7:7391", LastSeen: time.Now()})
 		})
@@ -254,8 +250,7 @@ func TestColdGetWaitsForDiscovery(t *testing.T) {
 	}
 }
 
-// The other side of the cold start fix. A settled daemon with no peers must not
-// spend discoveryWait on every fetch.
+// After startup warmup, an empty peer table must not delay every fetch.
 func TestNoWaitOnALonelyNetwork(t *testing.T) {
 	d, _ := newTestDaemon(t)
 	d.started = time.Now().Add(-2 * peerWarmup)
@@ -286,8 +281,8 @@ func TestPeersReturnsImmediatelyWhenWarm(t *testing.T) {
 	}
 }
 
-// Unicast answers go to whatever address the query claimed, and UDP sources are
-// forgeable, so an uncapped reply path is a reflector.
+// Legacy unicast replies need a separate cap because spoofed UDP sources can
+// turn the responder into an amplifier.
 func TestLegacyRepliesAreCapped(t *testing.T) {
 	var sent int
 	r := &responder{
@@ -306,8 +301,8 @@ func TestLegacyRepliesAreCapped(t *testing.T) {
 	}
 }
 
-// A machine that booted with its wifi off has no interface to join. Discovery
-// has to stay startable so netLoop can pick it up later.
+// Discovery must tolerate startup without an interface so netLoop can join the
+// multicast group when one appears.
 func TestMDNSStartsWithoutInterfaces(t *testing.T) {
 	f := &netFilter{addrs: map[string]bool{}}
 	r := &responder{
@@ -319,7 +314,7 @@ func TestMDNSStartsWithoutInterfaces(t *testing.T) {
 	if err := r.syncGroups(); !errors.Is(err, errNoInterface) {
 		t.Fatalf("syncGroups with no interfaces returned %v", err)
 	}
-	// An announcement still builds, ready for the moment one appears.
+	// Record construction does not require an active multicast membership.
 	if len(r.buildRecords(mdnsTTL)) == 0 {
 		t.Error("no announcement could be built")
 	}
@@ -447,8 +442,8 @@ func TestPeerVersionFiltering(t *testing.T) {
 	}
 }
 
-// RFC 6762 puts the cache flush bit on records unique to one machine and not on
-// shared ones, which here means everything except the service PTR.
+// RFC 6762 requires the cache flush bit on host specific records, but not on the
+// service PTR shared by every host.
 func TestCacheFlushBit(t *testing.T) {
 	r := &responder{
 		daemon:   &daemon{peers: newPeerTable(), net: emptyNetFilter(), hostID: "SELF12345678", port: 7391},

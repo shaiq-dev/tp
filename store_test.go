@@ -39,8 +39,8 @@ func TestStoreTake(t *testing.T) {
 			wantBodies: []string{"hello", "hello", "hello"},
 		},
 		{
-			// Regression: burning zeroed the buffer the caller was about to
-			// write, so --burn delivered a run of NUL bytes.
+			// Regression: burn once cleared the shared buffer before take
+			// returned it, causing --burn to send NUL bytes.
 			name:       "burn delivers the payload before zeroing it",
 			paste:      testPaste("a", "topsecret", maxGets(1)),
 			takes:      2,
@@ -83,11 +83,8 @@ func TestStoreTake(t *testing.T) {
 	}
 }
 
-// TestStoreCandidates checks the padding. The number of candidates on the wire
-// is a power of two, which says nothing beyond the order of magnitude, and there
-// is always at least one decoy so a full bucket is not a tell.
-// TestTakeLeavesRoomForTheTag covers sealing in place. Without the spare
-// capacity the AEAD allocates a second full copy of every paste in flight.
+// Reserving space for the AEAD tag avoids another payload sized allocation
+// during sealing.
 func TestTakeLeavesRoomForTheTag(t *testing.T) {
 	s := newStore()
 	p := testPaste("a", "hello")
@@ -98,7 +95,7 @@ func TestTakeLeavesRoomForTheTag(t *testing.T) {
 	if got := cap(body) - len(body); got < aeadOverhead {
 		t.Errorf("take left %d bytes spare, want at least %d", got, aeadOverhead)
 	}
-	// Sealing into that spare capacity does not reach back into the store.
+	// Mutating the returned buffer must not modify the stored payload.
 	sealed := make([]byte, 0, cap(body))
 	sealed = append(sealed, body...)
 	sealed = append(sealed, make([]byte, aeadOverhead)...)

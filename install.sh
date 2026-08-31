@@ -1,9 +1,10 @@
 #!/bin/sh
-# tp installer. Read it before you run it. It is meant to be read.
 #
-# Downloads are checked against a SHA-256 published in the release manifest,
-# which catches a corrupted or truncated transfer. Both the manifest and the
-# tarball come over HTTPS from GitHub, so GitHub is the thing being trusted.
+# tp installer.
+#
+# The release manifest contains each archive's SHA-256 checksum. This detects
+# damaged downloads but does not provide independent authenticity because the
+# manifest and archive come from the same GitHub release.
 #
 #   TP_VERSION=v0.1.0 sh install.sh    install a specific tag
 #   TP_PREFIX=/opt/tp sh install.sh    install somewhere else
@@ -35,8 +36,8 @@ case "$(uname -m)" in
   *) die "unsupported architecture $(uname -m). Build from source with: go install github.com/$REPO@latest" ;;
 esac
 
-# A 64 bit kernel often reports x86_64 or aarch64 while userspace is 32 bit.
-# Ask the C library which one it actually is before picking a binary.
+# The kernel may be 64-bit while userspace is 32-bit. Pick the binary using the
+# userspace word size reported by libc.
 if [ "$os" = linux ] && command -v getconf >/dev/null 2>&1; then
   case "$arch:$(getconf LONG_BIT 2>/dev/null || echo 64)" in
     amd64:32) arch=386 ;;
@@ -48,7 +49,6 @@ target="${os}_${arch}"
 command -v curl >/dev/null 2>&1 || die "curl is required"
 command -v tar  >/dev/null 2>&1 || die "tar is required"
 
-# Whichever of these the machine has. One of them always does.
 if command -v sha256sum >/dev/null 2>&1; then
   checksum() { sha256sum "$1" | cut -d' ' -f1; }
 elif command -v shasum >/dev/null 2>&1; then
@@ -59,8 +59,7 @@ else
   die "none of sha256sum, shasum or openssl is available, so the download cannot be checked"
 fi
 
-# HTTPS only, redirects included, unless the caller deliberately points this at
-# something else.
+# Enforce HTTPS for release URLs unless the caller configured a custom mirror.
 case "$BASE" in
   https://*) fetch() { curl -fsSL --proto '=https' --tlsv1.2 -o "$1" "$2"; } ;;
   *) echo "warning: $BASE is not https" >&2
@@ -74,8 +73,8 @@ cd "$tmp"
 fetch manifest.json "$BASE/manifest.json" \
   || die "could not fetch the manifest from $BASE"
 
-# The manifest is one flat line per target so a shell can read it without a
-# JSON parser: "linux_amd64": { "sha256": "...", "file": "..." }
+#Each target occupies one line so the manifest can be read without a JSON
+# parser: "linux_amd64": { "sha256": "...", "file": "..." }
 line="$(grep -F "\"$target\"" manifest.json)" || die "this release has no build for $target"
 sum="$(printf '%s' "$line" | sed -n 's/.*"sha256" *: *"\([0-9a-f]\{64\}\)".*/\1/p')"
 file="$(printf '%s' "$line" | sed -n 's/.*"file" *: *"\([^"]*\)".*/\1/p')"
@@ -83,8 +82,8 @@ if [ -z "$sum" ] || [ -z "$file" ]; then
   die "the manifest entry for $target is malformed"
 fi
 
-# A plain file name is all this script ever needs, and the manifest is only as
-# trustworthy as the host that served it, so a path here is refused.
+# Accept only a file name. Paths are unnecessary here and would make URL
+# construction unsafe.
 case "$file" in
   */*|.*|"") die "the manifest names a suspicious file: $file" ;;
 esac
@@ -95,7 +94,9 @@ got="$(checksum "$file")"
   expected $sum
   got      $got"
 
-# Only after the checksum passes is anything unpacked or made executable.
+
+# Checksum Verified 
+
 mkdir -p unpacked
 tar -xzf "$file" -C unpacked
 bin="$(find unpacked -type f -name tp -print | head -n 1)"
@@ -105,10 +106,8 @@ mkdir -p "$PREFIX/bin"
 chmod 0755 "$bin"
 mv "$bin" "$PREFIX/bin/tp"
 
-# The Go linker ad-hoc signs with the identifier "a.out", which every Go binary
-# on the machine shares, so macOS has nothing to record a local network decision
-# against. Re-signing with our own identifier gives the CLI an identity of its
-# own, and install-agent below does the same for the daemon.
+# macOS records local network permission against the signing identifier. Replace
+# Go's default "a.out" identifier with a stable identity inherited by the daemon.
 if [ "$os" = darwin ] && command -v codesign >/dev/null 2>&1; then
   codesign --force --sign - --identifier sh.tp "$PREFIX/bin/tp" 2>/dev/null \
     || echo "warning: could not re-sign tp, macOS may deny it local network access" >&2
@@ -120,12 +119,9 @@ case ":$PATH:" in
   *":$PREFIX/bin:"*) ;;
   *) echo "warning: $PREFIX/bin is not on your PATH. Add it to your shell profile yourself. This script does not edit rc files." >&2 ;;
 esac
-# Discovery is multicast, and two environments block it in ways that look like a
-# bug in tp. Both are worth saying here rather than leaving to a failed fetch.
+# Handle platform defaults known to block multicast discovery.
 if [ "$os" = darwin ]; then
-  # macOS 15 and later records local network access against a code signing
-  # identity. The re-sign above gave tp one, and the daemon is forked by the
-  # command so it inherits it. doctor --fix restarts the daemon and asks.
+  # Restart the daemon and trigger the local network permission prompt.
   echo
   if "$PREFIX/bin/tp" doctor --fix; then
     :
@@ -135,8 +131,7 @@ if [ "$os" = darwin ]; then
 fi
 
 if [ "$os" = linux ] && grep -qiE "microsoft|wsl" /proc/sys/kernel/osrelease 2>/dev/null; then
-  # NAT is the default networkingMode and keeps multicast inside the VM, so no
-  # announcement ever reaches the LAN and none arrives from it.
+  # WSL2 NAT does not forward multicast between the guest and the LAN.
   if ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | grep -qvE '^172\.(1[6-9]|2[0-9]|3[01])\.'; then
     echo
     echo "WSL detected, mirrored networking. Discovery should work."

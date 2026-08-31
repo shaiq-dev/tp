@@ -12,8 +12,8 @@ const (
 	maxPasteSize = 1 << 20
 	maxPastes    = 256
 
-	// Offers are padded to a power of two between these, so a machine holding
-	// nothing and one holding three are indistinguishable from outside.
+	// Pad offers into power of two buckets so their size reveals a range, not
+	// the exact number of live pastes.
 	minCandidates = 4
 	maxCandidates = 512
 	defaultTTL    = time.Hour
@@ -26,9 +26,8 @@ var (
 	errCollision = errors.New("code collision")
 )
 
-// paste is one served blob. The daemon holds the scrypt hardened PAKE password
-// derived from the code and never the code itself, so a memory dump yields
-// nothing that can be spoken down a corridor.
+// paste stores the payload and its scrypt hardened PAKE secret, never the
+// user facing code.
 type paste struct {
 	Label     string    `json:"label,omitempty"`
 	Size      int       `json:"size"`
@@ -45,9 +44,7 @@ type store struct {
 	mu sync.Mutex
 	m  map[string]*paste
 
-	// decoy is a PAKE password that matches no code. Enough copies pad the offer
-	// up to a power of two, so its size gives away a bucket rather than the
-	// exact number of pastes held.
+	// Random PAKE input used to pad offers without adding a real paste.
 	decoy []byte
 }
 
@@ -67,8 +64,7 @@ func (s *store) add(p *paste) error {
 	if len(s.m) >= maxPastes {
 		return errTooMany
 	}
-	// Overwriting would silently destroy a live paste, so the caller draws
-	// another code.
+	// Preserve the existing paste and let the caller generate another code.
 	if _, taken := s.m[pasteKey(p.prs)]; taken {
 		return errCollision
 	}
@@ -76,8 +72,8 @@ func (s *store) add(p *paste) error {
 	return nil
 }
 
-// candidates returns the PAKE passwords to run the handshake against: every live
-// paste, padded out with decoys and shuffled.
+// candidates returns active PAKE secrets plus shuffled decoys up to the padded
+// offer size.
 func (s *store) candidates() [][]byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -92,8 +88,7 @@ func (s *store) candidates() [][]byte {
 	for target := paddedCount(len(out)); len(out) < target; {
 		out = append(out, s.decoy)
 	}
-	// Unshuffled, the decoys sit at the end and give the count back through
-	// their position.
+	// Shuffle so decoy positions do not reveal the number of live entries.
 	for i := len(out) - 1; i > 0; i-- {
 		j := randIndex(i + 1)
 		out[i], out[j] = out[j], out[i]
@@ -101,8 +96,7 @@ func (s *store) candidates() [][]byte {
 	return out
 }
 
-// paddedCount rounds up to a power of two, leaving an observer the order of
-// magnitude instead of the number.
+// paddedCount returns the smallest power of two bucket with room for a decoy.
 func paddedCount(live int) int {
 	n := minCandidates
 	for n < live+1 && n < maxCandidates {
@@ -111,10 +105,8 @@ func paddedCount(live int) int {
 	return n
 }
 
-// take hands over a paste after a verified key confirmation and counts the
-// fetch. The returned slice is a copy, because hitting max_gets burns the paste
-// and zeroes the stored buffer, and a sweep on another goroutine can do the same
-// at any moment.
+// take records a verified fetch and returns a copy of the payload. The copy
+// remains valid if the stored paste is later burned or swept.
 func (s *store) take(prs []byte) []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -123,7 +115,7 @@ func (s *store) take(prs []byte) []byte {
 		return nil
 	}
 	p.Gets++
-	// Spare capacity for the AEAD tag lets pakeSide.seal encrypt in place.
+	// Reserve space for the AEAD tag so seal can encrypt this copy in place.
 	body := make([]byte, len(p.data), len(p.data)+aeadOverhead)
 	copy(body, p.data)
 	if p.MaxGets > 0 && p.Gets >= p.MaxGets {
@@ -132,8 +124,8 @@ func (s *store) take(prs []byte) []byte {
 	return body
 }
 
-// burn zeroes the payload and keeps the metadata, so tp list can explain why a
-// paste stopped working. The caller holds the lock.
+// burn clears the payload but retains its metadata for listing. The caller must
+// hold the store lock.
 func burn(p *paste) {
 	clear(p.data)
 	p.data = nil

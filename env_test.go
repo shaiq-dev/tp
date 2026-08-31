@@ -23,8 +23,7 @@ func TestLooksLikeWSL(t *testing.T) {
 }
 
 func TestWSLNAT(t *testing.T) {
-	// wslNAT reads addresses off real interfaces, so the cases that matter are
-	// covered through the range check it depends on.
+	// wslNAT reads live interface state, test its address classification directly.
 	for _, tc := range []struct {
 		ip   string
 		want bool

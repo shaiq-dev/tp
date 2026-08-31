@@ -9,8 +9,7 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 )
 
-// emptyNetFilter leaves a responder with no interfaces, so buildRecords emits no
-// A record and a test can supply its own.
+// emptyNetFilter lets tests inject A records without using host interfaces.
 func emptyNetFilter() *netFilter {
 	return &netFilter{addrs: map[string]bool{}}
 }
@@ -65,8 +64,7 @@ func TestPeerTableDiagnostic(t *testing.T) {
 	}{
 		{"too early to judge", time.Now(), 0, 0, false},
 		{"traffic is arriving", time.Now().Add(-time.Minute), 1, 1, false},
-		// The only speaker is this machine, which is normal on a home network and
-		// still proves the socket can receive.
+		// Local traffic is enough to prove multicast reception works.
 		{"only our own host is talking", time.Now().Add(-time.Minute), 0, 4, false},
 		{"nothing at all", time.Now().Add(-time.Minute), 0, 0, true},
 	}
@@ -83,8 +81,7 @@ func TestPeerTableDiagnostic(t *testing.T) {
 	}
 }
 
-// Feeds the parser a response shaped the way buildRecords emits one, which is
-// the only shape that has to round trip.
+// Exercise the response shape emitted by buildRecords.
 func TestLearnPeers(t *testing.T) {
 	self := &daemon{peers: newPeerTable(), net: emptyNetFilter(), hostID: "SELF12345678", port: 7391}
 	r := &responder{
@@ -102,7 +99,7 @@ func TestLearnPeers(t *testing.T) {
 		hostname: "theirs",
 	}
 	pkt := sender.buildRecords(mdnsTTL)
-	// buildRecords only emits A records for real interfaces, so this adds one.
+	// emptyNetFilter produces no A records, so inject one for the peer.
 	pkt = withARecord(t, pkt, sender.target, net.IPv4(10, 0, 0, 7))
 
 	var p dnsmessage.Parser
@@ -121,8 +118,7 @@ func TestLearnPeers(t *testing.T) {
 	}
 }
 
-// A busy LAN carries mDNS for printers and speakers on the same group, none of
-// which belong in the candidate list.
+// Ignore unrelated services sharing the mDNS multicast group.
 func TestLearnPeersIgnoresOtherServices(t *testing.T) {
 	self := &daemon{peers: newPeerTable(), hostID: "SELF12345678"}
 	r := &responder{daemon: self}
@@ -158,8 +154,7 @@ func TestLearnPeersIgnoresOtherServices(t *testing.T) {
 	}
 }
 
-// withARecord appends an A record to a packed message, supplying an address
-// without a real network interface.
+// withARecord injects an address without requiring a real network interface.
 func withARecord(t *testing.T, pkt []byte, name string, ip net.IP) []byte {
 	t.Helper()
 	var msg dnsmessage.Message
@@ -186,8 +181,7 @@ func withARecord(t *testing.T, pkt []byte, name string, ip net.IP) []byte {
 	return out
 }
 
-// The flood defence. However many queries land, one machine puts out one
-// reply.
+// Limit amplification by coalescing concurrent queries into one reply.
 func TestScheduleAnswerCoalesces(t *testing.T) {
 	sent := make(chan struct{}, 100)
 	r := &responder{
@@ -211,8 +205,7 @@ func TestScheduleAnswerCoalesces(t *testing.T) {
 	}
 }
 
-// Sending a goodbye is only half of it. The receiving side has to act on the
-// zero TTL, which it silently did not.
+// A zero TTL goodbye must remove the peer, not merely be emitted by the sender.
 func TestGoodbyeDropsThePeer(t *testing.T) {
 	self := &daemon{peers: newPeerTable(), hostID: "SELF12345678"}
 	r := &responder{daemon: self}

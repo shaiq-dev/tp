@@ -1,5 +1,3 @@
-// Command tp shares a paste with another machine on the same network. The code
-// is never transmitted: both sides run a balanced PAKE with it as the password.
 package main
 
 import (

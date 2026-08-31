@@ -1,8 +1,9 @@
 #!/bin/sh
-# Cross build every supported platform and package each one as a tarball, then
-# write SHA256SUMS and manifest.json alongside them.
 #
-#   VERSION=v0.1.0 scripts/build.sh
+# Build and package each supported target, then generate SHA256SUMS and
+# the installer manifest.
+#
+# VERSION=v0.1.0 scripts/build.sh
 set -eu
 cd "$(dirname "$0")/.."
 . scripts/lib.sh

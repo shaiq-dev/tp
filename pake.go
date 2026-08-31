@@ -12,19 +12,21 @@ import (
 	"golang.org/x/crypto/scrypt"
 )
 
-// CPace over ristretto255 with SHA-512, following draft-irtf-cfrg-cpace, which
-// calls this group G_Coffee25519 in its test vector file. Roles are symmetric,
-// so the session key transcript uses the unordered o_cat concatenation.
+// https://en.wikipedia.org/wiki/Password-authenticated_key_agreement
+//
+// CPace over ristretto255 and SHA-512, following draft-irtf-cfrg-cpace. The
+// draft's test vectors call this group G_Coffee25519. Because the roles are
+// symmetric, the session transcript uses the role independent o_cat ordering.
 const (
 	cpaceDSI    = "CPaceRistretto255"
 	cpaceDSIISK = "CPaceRistretto255_ISK"
 
-	// cpaceBlock is the SHA-512 input block size, s_in_bytes in the draft.
+	// SHA-512 block size, named s_in_bytes in the draft.
 	cpaceBlock = 128
 )
 
-// scrypt turns a spoken code into the PAKE password. These parameters set what
-// each guess costs an attacker: 32 MiB and roughly 37 ms per candidate.
+// These scrypt parameters make each code guess memory hard, using roughly
+// 32 MiB per derivation.
 const (
 	scryptN   = 1 << 15
 	scryptR   = 8
@@ -40,7 +42,7 @@ func derivePRS(code string) ([]byte, error) {
 	return scrypt.Key([]byte(code), scryptSalt, scryptN, scryptR, scryptP, scryptLen)
 }
 
-// prependLen is the draft's LEB128 length prefix.
+// prependLen applies the draft's LEB128 length encoding.
 func prependLen(b []byte) []byte {
 	n := len(b)
 	var out []byte
@@ -66,8 +68,7 @@ func lvCat(parts ...[]byte) []byte {
 	return out
 }
 
-// oCat orders its inputs by content, so both sides agree without either knowing
-// which spoke first.
+// oCat provides the role independent ordering used by the symmetric transcript.
 func oCat(a, b []byte) []byte {
 	out := []byte("oc")
 	if lexGreater(a, b) {
@@ -85,9 +86,8 @@ func lexGreater(a, b []byte) bool {
 	return len(a) > len(b)
 }
 
-// calculateGenerator maps the password, channel identifier and session id to a
-// group element. Everything an offline attacker needs sits inside this hash, and
-// getting back out of it means solving a discrete log.
+// calculateGenerator maps the password and channel/session identifiers to a
+// Ristretto group element.
 func calculateGenerator(prs, ci, sid []byte) *ristretto255.Element {
 	zpad := max(0, cpaceBlock-1-len(prependLen(prs))-len(prependLen([]byte(cpaceDSI))))
 	sum := sha512.Sum512(lvCat([]byte(cpaceDSI), prs, make([]byte, zpad), ci, sid))
@@ -110,9 +110,8 @@ func randomScalar() *ristretto255.Scalar {
 	return s
 }
 
-// scalarMultVfy rejects non canonical encodings and the identity element. The
-// draft requires an abort on both, since either collapses the shared secret to
-// a value the peer can predict.
+// scalarMultVfy rejects non canonical points and the identity element, either of
+// which would make the shared secret predictable.
 func scalarMultVfy(s *ristretto255.Scalar, encoded []byte) ([]byte, error) {
 	if len(encoded) != pointLen {
 		return nil, errBadPoint
@@ -128,20 +127,22 @@ func scalarMultVfy(s *ristretto255.Scalar, encoded []byte) ([]byte, error) {
 	return k.Bytes(), nil
 }
 
-// sessionKey derives the CPace intermediate session key from the shared secret
-// and both public shares.
+// sessionKey derives the CPace intermediate key from the shared point, session
+// ID and role independent public share transcript.
 func sessionKey(sid, k, ya, yb []byte) []byte {
 	transcript := oCat(lvCat(ya, nil), lvCat(yb, nil))
 	sum := sha512.Sum512(append(lvCat([]byte(cpaceDSIISK), sid, k), transcript...))
 	return sum[:]
 }
 
-// confirm is the key confirmation tag. Confirmation turns a shared secret into
-// authentication, and CPace without it proves nothing.
+// confirm binds a role label to the session key. Explicit key confirmation is
+// what authenticates the peer.
 func confirm(sk []byte, label string) []byte {
 	m := hmac.New(sha256.New, sk)
 	m.Write([]byte(label))
 	return m.Sum(nil)
 }
 
-func macEqual(a, b []byte) bool { return subtle.ConstantTimeCompare(a, b) == 1 }
+func macEqual(a, b []byte) bool {
+	return subtle.ConstantTimeCompare(a, b) == 1
+}

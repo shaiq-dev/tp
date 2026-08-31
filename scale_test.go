@@ -11,10 +11,8 @@ import (
 	"time"
 )
 
-// Handshake cost grows with the number of pastes a host serves, since the server
-// answers for all of them. These benchmarks produce the published scaling
-// numbers.
-
+// Server side PAKE work scales with the number of stored pastes because each
+// offer contains a confirmation for every candidate.
 func BenchmarkDerivePRS(b *testing.B) {
 	for b.Loop() {
 		if _, err := derivePRS("acid-acorn-acre"); err != nil {
@@ -82,12 +80,11 @@ func TestFanOutAcrossManyHosts(t *testing.T) {
 	}
 }
 
-// fanOutCase times one fetch across every host, with the holder last so nothing
-// short circuits.
+// fanOutCase places the holder last to exercise worst case scheduling across
+// the candidate list.
 //
-// Only the fetched paste carries a full 1 MiB body. BenchmarkPasteSize shows the
-// handshake never touches paste contents, and a hundred thousand real megabyte
-// pastes do not fit in one process. TestFullMachineMemory covers the memory.
+// Only the matching paste carries a full size body. Offer generation does not
+// read payloads, and TestFullMachineMemory covers the maximum in memory load.
 func fanOutCase(t *testing.T, hosts, pastesPerHost int) {
 	t.Helper()
 	if testing.Short() {
@@ -162,8 +159,7 @@ func fanOutCase(t *testing.T, hosts, pastesPerHost int) {
 		fanOut(len(cands)), candidates, offer, hosts*offer>>10)
 }
 
-// The largest load the caps allow, which decides whether a laptop can serve
-// one.
+// Measure heap usage at the maximum paste count and payload size.
 func TestFullMachineMemory(t *testing.T) {
 	if testing.Short() {
 		t.Skip("allocates a few hundred MiB")
@@ -195,8 +191,8 @@ func TestFullMachineMemory(t *testing.T) {
 	runtime.KeepAlive(s)
 }
 
-// Handshake cost is independent of paste size, which is what lets fanOutCase use
-// small filler bodies.
+// Verify that offer generation is independent of payload size. fanOutCase
+// relies on this when using small filler bodies.
 func BenchmarkPasteSize(b *testing.B) {
 	for _, size := range []int{1, maxPasteSize} {
 		b.Run(fmt.Sprintf("%d-byte-paste", size), func(b *testing.B) {
@@ -240,8 +236,8 @@ func storeWithPastes(tb testing.TB, n int) *store {
 	return s
 }
 
-// randomPRS stands in for a scrypt output, which the PAKE cannot distinguish and
-// which keeps these tests off a 37 ms key derivation per paste.
+// randomPRS avoids running scrypt for every benchmark fixture while preserving
+// the expected output length.
 func randomPRS(tb testing.TB) []byte {
 	tb.Helper()
 	prs := make([]byte, scryptLen)

@@ -10,6 +10,12 @@ import (
 
 const wordCount = 1295
 
+// EFF's eff_short_wordlist_1.txt with dice numbers removed and hyphenated
+// entries excluded. No word is a prefix of another.
+//
+// The list intentionally retains all 1295 words. randIndex supports
+// non power of two sizes without introducing modulo bias.
+//
 //go:embed wordlist
 var wordlistRaw string
 
@@ -29,7 +35,7 @@ func init() {
 	}
 }
 
-// newCode draws three words independently and uniformly, giving 31.0 bits.
+// Three words provide about 31 bits of entropy.
 func newCode() string {
 	parts := make([]string, 3)
 	for i := range parts {
@@ -38,12 +44,11 @@ func newCode() string {
 	return strings.Join(parts, "-")
 }
 
-// newDigitCode backs --code-style=digits. Nine digits is 29.9 bits and survives
-// dictation over a phone line, where words get misheard.
+// Nine digits provide 29.9 bits of entropy.
 func newDigitCode() string {
 	digits := make([]byte, 9)
 	for i := range digits {
-		digits[i] = byte('0' + randIndex(10)) //nolint:gosec // randIndex(10) is 0 to 9.
+		digits[i] = byte('0' + randIndex(10)) //nolint:gosec // randIndex uses crypto/rand.
 	}
 	return groupDigits(string(digits))
 }
@@ -52,8 +57,7 @@ func groupDigits(d string) string {
 	return d[0:3] + "-" + d[3:6] + "-" + d[6:9]
 }
 
-// randIndex returns a uniform index in [0,n). crypto/rand.Int rejection samples
-// internally, which matters because 1295 is not a power of two.
+// randIndex uses rejection sampling to avoid modulo bias for arbitrary values of n.
 func randIndex(n int) int {
 	if n <= 1 {
 		return 0
@@ -65,9 +69,8 @@ func randIndex(n int) int {
 	return int(v.Int64())
 }
 
-// canonical turns typed input into the exact string the code was generated as,
-// so both sides derive the same PAKE password. Words may be abbreviated to any
-// prefix matching one entry, and digit codes may be grouped any way.
+// canonical normalizes user input to the value used as the PAKE password.
+// Word prefixes are expanded, and digit codes are regrouped consistently.
 func canonical(code string) (string, error) {
 	code = strings.ToLower(strings.TrimSpace(code))
 	if digits, ok := digitCode(code); ok {
@@ -87,8 +90,6 @@ func canonical(code string) (string, error) {
 	return strings.Join(parts, "-"), nil
 }
 
-// digitCode reports whether code is a --code-style=digits code, returning its
-// nine digits with the grouping stripped.
 func digitCode(code string) (string, bool) {
 	var digits strings.Builder
 	for _, c := range code {
@@ -106,8 +107,8 @@ func digitCode(code string) (string, bool) {
 	return digits.String(), true
 }
 
-// expand resolves one abbreviated word. An ambiguous prefix fails here, before
-// anything reaches the network, so it costs no attempt against the rate limit.
+// expand resolves a word prefix locally so invalid or ambiguous input does not
+// consume an authentication attempt.
 func expand(prefix string) (string, error) {
 	var match string
 	n := 0

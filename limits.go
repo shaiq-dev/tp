@@ -5,26 +5,19 @@ import (
 	"time"
 )
 
-// Two token buckets and a block list, all in memory so a restart forgets them.
+// Rate limiting has two scopes. The per IP bucket protects handshake capacity
+// from a noisy peer, but it is not a security boundary because a LAN attacker
+// can use multiple addresses. The global bucket is the online guessing limit.
 //
-// The per IP bucket stops one noisy source starving everyone. It does not bound
-// guessing: on a LAN an attacker picks its own addresses, and a subnet full of
-// them multiplies the limit by the size of the subnet. Its burst is a full
-// minute's worth, because one tp get spends a token at every host on the
-// network and a person retyping a code they got wrong would otherwise run out.
-//
-// The global bucket is what bounds guessing. Every exchange that reaches the
-// offer is one password guess whoever it came from, so capping them together
-// caps the rate however the attacker is addressed. Ten a second puts the 2^31
-// codes at about seven years. Real load is nowhere near it: a thousand fetches
-// an hour across a thousand machines is under a third of a second's worth.
+// The burst allowance leaves room for fan out and mistyped codes. Repeated
+// confirmation failures temporarily block the source address. All state is
+// in memory and resets with the daemon.
 const (
-	rateBurst     = 20
-	ratePerMinute = 20
-	blockAfter    = 50
-	blockWindow   = 10 * time.Minute
-	blockFor      = time.Hour
-
+	rateBurst       = 20
+	ratePerMinute   = 20
+	blockAfter      = 50
+	blockWindow     = 10 * time.Minute
+	blockFor        = time.Hour
 	globalBurst     = 60
 	globalPerSecond = 10
 )
@@ -35,8 +28,7 @@ type limiter struct {
 	global bucket
 }
 
-// bucket runs on the monotonic clock, so time spent suspended does not refill
-// it.
+// Use monotonic elapsed time so wall clock changes do not affect token refill.
 type bucket struct {
 	tokens float64
 	last   time.Time
@@ -64,8 +56,7 @@ type ipState struct {
 
 func newLimiter() *limiter { return &limiter{ip: make(map[string]*ipState)} }
 
-// allowPeer runs before the TLS handshake, so a flood from one source is
-// rejected before it costs a handshake.
+// allowPeer enforces per IP admission before any TLS work begins.
 func (l *limiter) allowPeer(addr string) bool {
 	now := time.Now()
 	l.mu.Lock()
@@ -83,9 +74,8 @@ func (l *limiter) allowPeer(addr string) bool {
 	return s.take(now, rateBurst, ratePerMinute/60.0)
 }
 
-// allowExchange spends from the shared budget. Call it immediately before the
-// offer and nowhere earlier: the offer is the oracle, and charging at accept
-// lets a bare TCP flood that tests no password drain the budget.
+// Charge the global budget immediately before sending a testable offer. Charging
+// earlier would let a plain TCP flood consume it without making password guesses.
 func (l *limiter) allowExchange() bool {
 	now := time.Now()
 	l.mu.Lock()
@@ -93,7 +83,7 @@ func (l *limiter) allowExchange() bool {
 	return l.global.take(now, globalBurst, globalPerSecond)
 }
 
-// fail records a wrong key confirmation and blocks the IP once they pile up.
+// fail blocks an address after enough confirmation failures within blockWindow.
 func (l *limiter) fail(addr string) {
 	now := time.Now()
 	l.mu.Lock()
@@ -117,8 +107,7 @@ func (l *limiter) fail(addr string) {
 	}
 }
 
-// sweep drops state for IPs that have gone quiet, bounding the map on a busy
-// network.
+// sweep removes inactive per IP state to keep the map bounded.
 func (l *limiter) sweep() {
 	now := time.Now()
 	l.mu.Lock()
