@@ -9,14 +9,13 @@ otter-piano-cobalt
 tp get otter-piano-cobalt      # on the other machine
 ```
 
-
 ## Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/shaiq-dev/tp/main/install.sh | sh
 ```
 
-<br />
+\
 The installer downloads the latest release archive to `~/.local/bin/tp`. It does not use sudo or modify shell startup files. Set `TP_VERSION` to install a specific release or `TP_PREFIX` to choose another location:
 
 ```bash
@@ -24,16 +23,12 @@ curl -fsSL https://raw.githubusercontent.com/shaiq-dev/tp/main/install.sh | TP_V
 curl -fsSL https://raw.githubusercontent.com/shaiq-dev/tp/main/install.sh | TP_PREFIX=/opt/tp sh
 ```
 
-<br />
+\
 You can also install from source:
 
 ```go
 go install github.com/shaiq-dev/tp@latest
 ```
-
-<br />
-Prebuilt tarballs and a `SHA256SUMS` file are attached to every [release](https://github.com/shaiq-dev/tp/releases).
-
 
 ## Supported platforms
 
@@ -58,7 +53,8 @@ Release builds use `CGO_ENABLED=0`. Linux binaries do not depend on glibc, musl,
 | `tp completion <shell>` | Generate completion for Bash, Zsh, or Fish |
 | `tp version` | Build and platform information |
 
-Useful posting options:
+\
+Post options:
 
 ```sh
 tp post --label notes --ttl 30m notes.txt
@@ -67,12 +63,14 @@ tp post --max-gets 3 archive.tar.gz
 tp post --code-style=digits notes.txt
 ```
 
+\
 Use `--host` when you know the sender's address and want to bypass discovery:
 
 ```sh
 tp get --host 192.168.1.20 otter-piano-cobalt
 ```
 
+\
 Word codes accept any unambiguous prefix, so this works too:
 
 ```sh
