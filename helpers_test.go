@@ -36,3 +36,15 @@ func (c controlServer) do(ctx context.Context, method, path, body string, out an
 	defer resp.Body.Close()
 	return decodeControlResponse(resp, out)
 }
+
+type stubDiscovery struct {
+	onQuery func()
+}
+
+func (s stubDiscovery) networkChanged() {}
+
+func (s stubDiscovery) query() {
+	if s.onQuery != nil {
+		s.onQuery()
+	}
+}

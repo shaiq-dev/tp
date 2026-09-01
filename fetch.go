@@ -49,15 +49,14 @@ func (e *pinMismatchError) Error() string {
 func fetch(ctx context.Context, prs []byte, cands []candidate) ([]byte, error) {
 	// Try pinned hosts first, a previous sender is more likely to hold the paste.
 	cands = slices.Clone(cands)
-	slices.SortStableFunc(cands, func(a, b candidate) int {
-		switch {
-		case a.pin != nil && b.pin == nil:
-			return -1
-		case a.pin == nil && b.pin != nil:
-			return 1
-		default:
+	rank := func(c candidate) int {
+		if c.pin != nil {
 			return 0
 		}
+		return 1
+	}
+	slices.SortStableFunc(cands, func(a, b candidate) int {
+		return rank(a) - rank(b)
 	})
 
 	ctx, cancel := context.WithCancel(ctx)

@@ -63,7 +63,7 @@ func report(ctx context.Context) error {
 
 	if isWSL() {
 		mode := "mirrored"
-		if wslNAT(mustInterfaces()) {
+		if wslNAT(interfacesOrNil()) {
 			mode = "nat"
 		}
 		fmt.Printf("wsl:         %s networking\n", mode)

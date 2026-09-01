@@ -132,12 +132,19 @@ func burn(p *paste) {
 	p.Burned = true
 }
 
-func (s *store) list() []*paste {
+func (s *store) list() []paste {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]*paste, 0, len(s.m))
+	out := make([]paste, 0, len(s.m))
 	for _, p := range s.m {
-		out = append(out, p)
+		out = append(out, paste{
+			Label:     p.Label,
+			Size:      p.Size,
+			ExpiresAt: p.ExpiresAt,
+			MaxGets:   p.MaxGets,
+			Gets:      p.Gets,
+			Burned:    p.Burned,
+		})
 	}
 	return out
 }

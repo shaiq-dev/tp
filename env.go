@@ -55,7 +55,7 @@ func wslNAT(ifaces []net.Interface) bool {
 // discoveryAdvice returns platform specific fixes for failed multicast discovery.
 func discoveryAdvice() []string {
 	switch {
-	case isWSL() && wslNAT(mustInterfaces()):
+	case isWSL() && wslNAT(interfacesOrNil()):
 		return []string{
 			"WSL is in NAT mode, so multicast never reaches your LAN. Switch to mirrored networking:",
 			"  1. in Windows, put this in %UserProfile%\\.wslconfig",
@@ -79,7 +79,7 @@ func discoveryAdvice() []string {
 	return nil
 }
 
-func mustInterfaces() []net.Interface {
+func interfacesOrNil() []net.Interface {
 	ifaces, err := usableInterfaces()
 	if err != nil {
 		return nil

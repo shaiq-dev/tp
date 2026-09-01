@@ -156,7 +156,10 @@ func listenMDNS(ctx context.Context) (*ipv4.PacketConn, error) {
 }
 
 type responder struct {
-	daemon *daemon
+	peers  *peerTable
+	net    *netFilter
+	hostID string
+	port   int
 	conn   *ipv4.PacketConn
 
 	// instance is <hostID>._tp._tcp.local. and target is <hostID>.local.
@@ -185,37 +188,38 @@ type responder struct {
 }
 
 // startMDNS returns a stop function that sends a goodbye before closing the socket.
-func startMDNS(ctx context.Context, d *daemon) (func(), error) {
+func startMDNS(ctx context.Context, peers *peerTable, nf *netFilter, hostID string, port int) (*responder, func(), error) {
 	noop := func() {}
 	conn, err := listenMDNS(ctx)
 	if err != nil {
-		return noop, err
+		return nil, noop, err
 	}
 	if err := conn.SetMulticastLoopback(true); err != nil {
 		_ = conn.Close()
-		return noop, err
+		return nil, noop, err
 	}
 
 	name, _ := os.Hostname()
 	r := &responder{
-		daemon:   d,
+		peers:    peers,
+		net:      nf,
+		hostID:   hostID,
+		port:     port,
 		conn:     conn,
 		joined:   make(map[string]bool),
-		instance: d.hostID + "." + mdnsService,
-		target:   d.hostID + ".local.",
+		instance: hostID + "." + mdnsService,
+		target:   hostID + ".local.",
 		hostname: strings.TrimSuffix(name, ".local"),
 	}
 	// Starting without a usable interface (machine that booted with its wifi off) is valid,
 	// netLoop retries after the network changes.
 	_ = r.syncGroups()
-	d.onNetChange = r.networkChanged
-	d.probe = r.query
 
 	go r.readLoop()
 	go r.announceLoop(ctx)
 	go r.browseLoop(ctx)
 
-	return func() {
+	return r, func() {
 		// Remove this address from peer caches before closing the socket.
 		r.send(r.buildRecords(0))
 		_ = conn.Close()
@@ -225,7 +229,7 @@ func startMDNS(ctx context.Context, d *daemon) (func(), error) {
 // syncGroups joins new interfaces and forgets those that disappeared. A removed
 // interface takes its multicast membership with it.
 func (r *responder) syncGroups() error {
-	ifaces := r.daemon.net.interfaces()
+	ifaces := r.net.interfaces()
 
 	r.joinedMu.Lock()
 	defer r.joinedMu.Unlock()
@@ -271,12 +275,12 @@ func jitter(d time.Duration) time.Duration {
 // announceLoop sends startup retries followed by periodic announcements.
 func (r *responder) announceLoop(ctx context.Context) {
 	for _, delay := range startupBurst {
-		if !sleep(ctx, delay) {
+		if !waited(ctx, delay) {
 			return
 		}
 		r.send(r.buildRecords(mdnsTTL))
 	}
-	for sleep(ctx, jitter(announceInterval)) {
+	for waited(ctx, jitter(announceInterval)) {
 		r.send(r.buildRecords(mdnsTTL))
 	}
 }
@@ -284,13 +288,13 @@ func (r *responder) announceLoop(ctx context.Context) {
 // browseLoop queries during startup and later only when no peers are known.
 func (r *responder) browseLoop(ctx context.Context) {
 	for _, delay := range startupBurst {
-		if !sleep(ctx, delay) {
+		if !waited(ctx, delay) {
 			return
 		}
 		r.query()
 	}
-	for sleep(ctx, browseWhenEmpty) {
-		if len(r.daemon.peers.list()) == 0 {
+	for waited(ctx, browseWhenEmpty) {
+		if len(r.peers.list()) == 0 {
 			r.query()
 		}
 	}
@@ -316,9 +320,9 @@ func (r *responder) readLoop() {
 		if err != nil {
 			return
 		}
-		r.daemon.peers.anyPackets.Add(1)
+		r.peers.anyPackets.Add(1)
 		if !r.isOwn(src) {
-			r.daemon.peers.packets.Add(1)
+			r.peers.packets.Add(1)
 		}
 		r.handle(buf[:n], src)
 	}
@@ -329,7 +333,7 @@ func (r *responder) isOwn(src net.Addr) bool {
 	if err != nil {
 		return false
 	}
-	return r.daemon.net.isOwnAddr(host)
+	return r.net.isOwnAddr(host)
 }
 
 func (r *responder) handle(pkt []byte, src net.Addr) {
@@ -403,11 +407,11 @@ func (r *responder) learnPeers(p *dnsmessage.Parser) {
 	// Strip the monotonic component so time spent asleep counts toward peer age.
 	now := time.Now().Round(0)
 	for id, e := range found {
-		if id == r.daemon.hostID || e.port == 0 {
+		if id == r.hostID || e.port == 0 {
 			continue
 		}
 		if e.leaving {
-			r.daemon.peers.drop(id)
+			r.peers.drop(id)
 			continue
 		}
 		if e.version != "" && e.version != txtVersion {
@@ -417,7 +421,7 @@ func (r *responder) learnPeers(p *dnsmessage.Parser) {
 		if ip == nil {
 			continue
 		}
-		r.daemon.peers.put(peer{
+		r.peers.put(peer{
 			HostID:   id,
 			Hostname: e.hostname,
 			Addr:     net.JoinHostPort(ip.String(), strconv.Itoa(int(e.port))),
@@ -527,7 +531,7 @@ func (r *responder) buildRecords(ttl uint32) []byte {
 			{
 				Header: header(r.instance, dnsmessage.TypeSRV, classFlush),
 				Body: &dnsmessage.SRVResource{
-					Port:   uint16(r.daemon.port), //nolint:gosec // A TCP port always fits.
+					Port:   uint16(r.port), //nolint:gosec // A TCP port always fits.
 					Target: dnsmessage.MustNewName(r.target),
 				},
 			},
@@ -537,7 +541,7 @@ func (r *responder) buildRecords(ttl uint32) []byte {
 			},
 		},
 	}
-	for _, ifi := range r.daemon.net.interfaces() {
+	for _, ifi := range r.net.interfaces() {
 		ip := ip4(ifi)
 		if ip == nil {
 			continue
@@ -565,7 +569,7 @@ func (r *responder) send(buf []byte) {
 	r.sendMu.Lock()
 	defer r.sendMu.Unlock()
 	dst := &net.UDPAddr{IP: mdnsGroup, Port: mdnsPort}
-	for _, ifi := range r.daemon.net.interfaces() {
+	for _, ifi := range r.net.interfaces() {
 		if err := r.conn.SetMulticastInterface(&ifi); err != nil {
 			continue
 		}

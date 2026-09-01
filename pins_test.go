@@ -8,15 +8,15 @@ import (
 func TestPinRoundTrip(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 
-	if got := loadPins(); len(got) != 0 {
+	if got, _ := readPins(); len(got) != 0 {
 		t.Fatalf("a fresh cache holds %d pins", len(got))
 	}
 	first := pin{SPKI: "aaaa", Hostname: "laptop"}
 	if err := savePin("HOST1", first); err != nil {
 		t.Fatal(err)
 	}
-	if got := loadPins()["HOST1"]; got != first {
-		t.Errorf("loadPins = %+v, want %+v", got, first)
+	if pins, _ := readPins(); pins["HOST1"] != first {
+		t.Errorf("readPins = %+v, want %+v", pins["HOST1"], first)
 	}
 
 	// A replacement entry for the same host ID wins on the next read.
@@ -24,8 +24,8 @@ func TestPinRoundTrip(t *testing.T) {
 	if err := savePin("HOST1", second); err != nil {
 		t.Fatal(err)
 	}
-	if got := loadPins()["HOST1"]; got != second {
-		t.Errorf("loadPins = %+v, want %+v", got, second)
+	if pins, _ := readPins(); pins["HOST1"] != second {
+		t.Errorf("readPins = %+v, want %+v", pins["HOST1"], second)
 	}
 }
 

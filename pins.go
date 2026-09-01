@@ -30,11 +30,6 @@ func spkiHash(cert *x509.Certificate) string {
 	return base64.RawStdEncoding.EncodeToString(sum[:])
 }
 
-func loadPins() map[string]pin {
-	pins, _ := readPins()
-	return pins
-}
-
 // readPins returns the physical line count so savePin knows when duplicate
 // history needs compaction.
 func readPins() (map[string]pin, int) {

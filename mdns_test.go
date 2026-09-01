@@ -85,7 +85,10 @@ func TestPeerTableDiagnostic(t *testing.T) {
 func TestLearnPeers(t *testing.T) {
 	self := &daemon{peers: newPeerTable(), net: emptyNetFilter(), hostID: "SELF12345678", port: 7391}
 	r := &responder{
-		daemon:   self,
+		peers:    self.peers,
+		net:      self.net,
+		hostID:   self.hostID,
+		port:     self.port,
 		instance: "SELF12345678." + mdnsService,
 		target:   "SELF12345678.local.",
 		hostname: "mine",
@@ -93,7 +96,10 @@ func TestLearnPeers(t *testing.T) {
 
 	other := &daemon{peers: newPeerTable(), net: emptyNetFilter(), hostID: "PEER12345678", port: 4242}
 	sender := &responder{
-		daemon:   other,
+		peers:    other.peers,
+		net:      other.net,
+		hostID:   other.hostID,
+		port:     other.port,
 		instance: "PEER12345678." + mdnsService,
 		target:   "PEER12345678.local.",
 		hostname: "theirs",
@@ -121,7 +127,7 @@ func TestLearnPeers(t *testing.T) {
 // Ignore unrelated services sharing the mDNS multicast group.
 func TestLearnPeersIgnoresOtherServices(t *testing.T) {
 	self := &daemon{peers: newPeerTable(), hostID: "SELF12345678"}
-	r := &responder{daemon: self}
+	r := &responder{peers: self.peers, net: self.net, hostID: self.hostID, port: self.port}
 
 	msg := dnsmessage.Message{
 		Header: dnsmessage.Header{Response: true},
@@ -185,7 +191,9 @@ func withARecord(t *testing.T, pkt []byte, name string, ip net.IP) []byte {
 func TestScheduleAnswerCoalesces(t *testing.T) {
 	sent := make(chan struct{}, 100)
 	r := &responder{
-		daemon:   &daemon{peers: newPeerTable(), net: emptyNetFilter(), hostID: "SELF12345678"},
+		peers:    newPeerTable(),
+		net:      emptyNetFilter(),
+		hostID:   "SELF12345678",
 		instance: "SELF12345678." + mdnsService,
 		target:   "SELF12345678.local.",
 		onSend:   func([]byte) { sent <- struct{}{} },
@@ -208,9 +216,12 @@ func TestScheduleAnswerCoalesces(t *testing.T) {
 // A zero TTL goodbye must remove the peer, not merely be emitted by the sender.
 func TestGoodbyeDropsThePeer(t *testing.T) {
 	self := &daemon{peers: newPeerTable(), hostID: "SELF12345678"}
-	r := &responder{daemon: self}
+	r := &responder{peers: self.peers, net: self.net, hostID: self.hostID, port: self.port}
 	leaver := &responder{
-		daemon:   &daemon{peers: newPeerTable(), net: emptyNetFilter(), hostID: "PEER12345678", port: 4242},
+		peers:    newPeerTable(),
+		net:      emptyNetFilter(),
+		hostID:   "PEER12345678",
+		port:     4242,
 		instance: "PEER12345678." + mdnsService,
 		target:   "PEER12345678.local.",
 		hostname: "theirs",
@@ -240,7 +251,10 @@ func TestGoodbyeDropsThePeer(t *testing.T) {
 
 func TestGoodbyeRecordsHaveZeroTTL(t *testing.T) {
 	r := &responder{
-		daemon:   &daemon{peers: newPeerTable(), net: emptyNetFilter(), hostID: "SELF12345678", port: 7391},
+		peers:    newPeerTable(),
+		net:      emptyNetFilter(),
+		hostID:   "SELF12345678",
+		port:     7391,
 		instance: "SELF12345678." + mdnsService,
 		target:   "SELF12345678.local.",
 	}

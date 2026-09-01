@@ -219,7 +219,7 @@ func TestColdGetWaitsForDiscovery(t *testing.T) {
 	srv := newControlServer(t, d)
 
 	probed := make(chan struct{}, 1)
-	d.probe = func() {
+	d.mdns = stubDiscovery{onQuery: func() {
 		select {
 		case probed <- struct{}{}:
 		default:
@@ -228,7 +228,7 @@ func TestColdGetWaitsForDiscovery(t *testing.T) {
 		time.AfterFunc(50*time.Millisecond, func() {
 			d.peers.put(peer{HostID: "PEER12345678", Addr: "10.0.0.7:7391", LastSeen: time.Now()})
 		})
-	}
+	}}
 
 	var out struct {
 		Peers []peer `json:"peers"`
@@ -255,7 +255,7 @@ func TestNoWaitOnALonelyNetwork(t *testing.T) {
 	d, _ := newTestDaemon(t)
 	d.started = time.Now().Add(-2 * peerWarmup)
 	srv := newControlServer(t, d)
-	d.probe = func() { t.Error("a settled daemon should not keep asking on every fetch") }
+	d.mdns = stubDiscovery{onQuery: func() { t.Error("a settled daemon should not keep asking on every fetch") }}
 
 	start := time.Now()
 	if err := srv.do(t.Context(), "GET", "/peers?wait=2s", "", nil); err != nil {
@@ -270,7 +270,7 @@ func TestPeersReturnsImmediatelyWhenWarm(t *testing.T) {
 	d, _ := newTestDaemon(t)
 	srv := newControlServer(t, d)
 	d.peers.put(peer{HostID: "PEER12345678", Addr: "10.0.0.7:7391", LastSeen: time.Now()})
-	d.probe = func() { t.Error("a warm table should not provoke a query") }
+	d.mdns = stubDiscovery{onQuery: func() { t.Error("a warm table should not provoke a query") }}
 
 	start := time.Now()
 	if err := srv.do(t.Context(), "GET", "/peers?wait=5s", "", nil); err != nil {
@@ -286,7 +286,9 @@ func TestPeersReturnsImmediatelyWhenWarm(t *testing.T) {
 func TestLegacyRepliesAreCapped(t *testing.T) {
 	var sent int
 	r := &responder{
-		daemon:   &daemon{peers: newPeerTable(), net: emptyNetFilter(), hostID: "SELF12345678"},
+		peers:    newPeerTable(),
+		net:      emptyNetFilter(),
+		hostID:   "SELF12345678",
 		instance: "SELF12345678." + mdnsService,
 		target:   "SELF12345678.local.",
 		onSend:   func([]byte) { sent++ },
@@ -306,7 +308,9 @@ func TestLegacyRepliesAreCapped(t *testing.T) {
 func TestMDNSStartsWithoutInterfaces(t *testing.T) {
 	f := &netFilter{addrs: map[string]bool{}}
 	r := &responder{
-		daemon:   &daemon{peers: newPeerTable(), net: f, hostID: "SELF12345678"},
+		peers:    newPeerTable(),
+		net:      f,
+		hostID:   "SELF12345678",
 		joined:   map[string]bool{},
 		instance: "SELF12345678." + mdnsService,
 		target:   "SELF12345678.local.",
@@ -422,7 +426,7 @@ func TestPeerVersionFiltering(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			self := &daemon{peers: newPeerTable(), net: emptyNetFilter(), hostID: "SELF12345678"}
-			r := &responder{daemon: self}
+			r := &responder{peers: self.peers, net: self.net, hostID: self.hostID, port: self.port}
 
 			txt := []string{"host=theirs"}
 			if tt.version != "" {
@@ -446,7 +450,10 @@ func TestPeerVersionFiltering(t *testing.T) {
 // service PTR shared by every host.
 func TestCacheFlushBit(t *testing.T) {
 	r := &responder{
-		daemon:   &daemon{peers: newPeerTable(), net: emptyNetFilter(), hostID: "SELF12345678", port: 7391},
+		peers:    newPeerTable(),
+		net:      emptyNetFilter(),
+		hostID:   "SELF12345678",
+		port:     7391,
 		instance: "SELF12345678." + mdnsService,
 		target:   "SELF12345678.local.",
 	}

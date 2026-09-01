@@ -39,6 +39,11 @@ const (
 	peerWarmup = 5 * time.Second
 )
 
+type discovery interface {
+	networkChanged()
+	query()
+}
+
 type daemon struct {
 	store   *store
 	limiter *limiter
@@ -49,8 +54,7 @@ type daemon struct {
 	started time.Time
 
 	// Set by startMDNS, nil when discovery is unavailable.
-	onNetChange func()
-	probe       func()
+	mdns discovery
 
 	// Stored as Unix seconds so updates remain atomic.
 	lastUsed atomic.Int64
@@ -92,9 +96,9 @@ func runDaemon(ctx context.Context) error {
 	}
 	defer func() { _ = sock.Close() }()
 
-	port, ok := listenPort(data)
-	if !ok {
-		return errors.New("data plane: listener has no TCP address")
+	port, err := listenPort(data)
+	if err != nil {
+		return err
 	}
 
 	d := &daemon{
@@ -113,10 +117,11 @@ func runDaemon(ctx context.Context) error {
 	defer stopIdle()
 
 	// Direct fetches through --host do not depend on discovery.
-	stopMDNS, err := startMDNS(ctx, d)
+	mdns, stopMDNS, err := startMDNS(ctx, d.peers, d.net, d.hostID, d.port)
 	if err != nil {
 		log.Printf("mdns: %v, tp get --host still works", err)
 	}
+	d.mdns = mdns
 	defer stopMDNS()
 
 	go d.sweepLoop(ctx, stopIdle)
@@ -137,26 +142,15 @@ func runDaemon(ctx context.Context) error {
 // netLoop keeps discovery and data plane filtering in sync with interface
 // changes. It remains active even if mDNS failed to start.
 func (d *daemon) netLoop(ctx context.Context) {
-	for sleep(ctx, ifaceRefresh) {
+	for waited(ctx, ifaceRefresh) {
 		if !d.net.refresh() {
 			continue
 		}
 		// Peers learned on the previous network are no longer reachable.
 		d.peers.clear()
-		if d.onNetChange != nil {
-			d.onNetChange()
+		if d.mdns != nil {
+			d.mdns.networkChanged()
 		}
-	}
-}
-
-func sleep(ctx context.Context, d time.Duration) bool {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-t.C:
-		return true
-	case <-ctx.Done():
-		return false
 	}
 }
 
@@ -175,12 +169,12 @@ func listenData(ctx context.Context, cfg *tls.Config) (net.Listener, error) {
 	return nil, errors.New("data plane: no port available")
 }
 
-func listenPort(l net.Listener) (int, bool) {
+func listenPort(l net.Listener) (int, error) {
 	addr, ok := l.Addr().(*net.TCPAddr)
 	if !ok {
-		return 0, false
+		return 0, errors.New("data plane: listener has no TCP address")
 	}
-	return addr.Port, true
+	return addr.Port, nil
 }
 
 func (d *daemon) sweepLoop(ctx context.Context, stop func()) {
@@ -213,7 +207,7 @@ func (d *daemon) serveData(ctx context.Context, l net.Listener) error {
 			// Go retries EINTR, EAGAIN and ECONNABORTED internally. Retry descriptor resource
 			// exhaustion rather than dropping the in memory store.
 			if ctx.Err() == nil && retryableAccept(err) {
-				if !sleep(ctx, retry) {
+				if !waited(ctx, retry) {
 					return ctx.Err()
 				}
 				retry = min(retry*2, acceptRetryCeiling)
@@ -511,12 +505,12 @@ func (d *daemon) waitForPeers(ctx context.Context, wait time.Duration) {
 	if len(d.peers.list()) > 0 || time.Since(d.started) > peerWarmup {
 		return
 	}
-	if d.probe != nil {
-		d.probe()
+	if d.mdns != nil {
+		d.mdns.query()
 	}
 	deadline := time.Now().Add(wait)
 	for time.Now().Before(deadline) {
-		if !sleep(ctx, peerPollInterval) {
+		if !waited(ctx, peerPollInterval) {
 			return
 		}
 		if len(d.peers.list()) > 0 {
@@ -580,37 +574,4 @@ func listenControl(ctx context.Context) (net.Listener, error) {
 		return nil, err
 	}
 	return l, nil
-}
-
-func dataDir() (string, error) {
-	return xdgDir("XDG_DATA_HOME", ".local", "share")
-}
-
-func sockPath() (string, error) {
-	dir, err := xdgDir("XDG_RUNTIME_DIR", ".local", "state")
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "sock"), nil
-}
-
-func xdgDir(env string, fallback ...string) (string, error) {
-	dir, err := xdgPath(env, fallback...)
-	if err != nil {
-		return "", err
-	}
-	return dir, os.MkdirAll(dir, 0o700)
-}
-
-// xdgPath returns the location without creating it.
-func xdgPath(env string, fallback ...string) (string, error) {
-	dir := os.Getenv(env)
-	if dir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		dir = filepath.Join(append([]string{home}, fallback...)...)
-	}
-	return filepath.Join(dir, "tp"), nil
 }
