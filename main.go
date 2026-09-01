@@ -20,8 +20,8 @@ import (
 	"time"
 )
 
-// discoveryWait bounds how long tp get blocks for the first mDNS answers. The
-// daemon caps it at peerWarmup, so a settled daemon returns immediately.
+// Wait for initial mDNS replies. After peerWarmup, an empty cache
+// returns immediately.
 const discoveryWait = 2 * time.Second
 
 const usage = `tp shares a paste with another machine on the same network.
@@ -40,12 +40,11 @@ const usage = `tp shares a paste with another machine on the same network.
 `
 
 func main() {
-	// The exit code is returned rather than taken here, so the signal handler
-	// and everything else deferred below still unwinds.
-	os.Exit(main1())
+	// Keep os.Exit outside app() so its deferred cleanup runs.
+	os.Exit(app())
 }
 
-func main1() int {
+func app() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -80,7 +79,6 @@ func run(ctx context.Context, args []string) error {
 		fmt.Print(readBuildInfo())
 		return nil
 	case "daemon":
-		// A signal is the normal way the daemon stops.
 		if err := runDaemon(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			return err
 		}
@@ -151,7 +149,7 @@ func cmdGet(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	// One scrypt pass for the whole fan out, not one per candidate.
+	// Derive once, every candidate exchange uses the same PAKE secret.
 	prs, err := derivePRS(code)
 	if err != nil {
 		return err
@@ -184,14 +182,13 @@ func withDefaultPort(host string) string {
 	return host
 }
 
-// discover reads the local daemon's mDNS cache. Announcements keep it warm, so a
-// settled daemon answers in well under a millisecond.
+// discover reads the daemon's mDNS cache, waiting briefly during cold start.
 func discover(ctx context.Context) ([]candidate, error) {
 	var out struct {
 		Peers      []peer `json:"peers"`
 		Diagnostic string `json:"diagnostic"`
 	}
-	// A daemon forked by this command has heard from nobody yet.
+	// A daemon forked by this command may not have received an announcement yet.
 	if err := control(ctx, http.MethodGet, "/peers?wait="+discoveryWait.String(), nil, &out); err != nil {
 		return nil, err
 	}
@@ -255,7 +252,7 @@ func cmdDel(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		// The daemon is addressed by the derived password, never by the code.
+		// Send the derived PAKE secret, not the user facing code.
 		prs, err := derivePRS(code)
 		if err != nil {
 			return err
@@ -265,8 +262,8 @@ func cmdDel(ctx context.Context, args []string) error {
 	return control(ctx, http.MethodDelete, path, nil, nil)
 }
 
-// control sends a request to the local daemon over the unix socket, starting the
-// daemon first if nothing is listening, and decodes the reply into out.
+// control starts the daemon if needed, sends a request over its Unix socket and
+// decodes the response into out.
 func control(ctx context.Context, method, path string, body io.Reader, out any) error {
 	sock, err := sockPath()
 	if err != nil {
@@ -305,8 +302,7 @@ func decodeControlResponse(resp *http.Response, out any) error {
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
-// ensureDaemon forks the daemon when the socket is not answering, which is what
-// keeps tp off systemd and launchd.
+// ensureDaemon starts the daemon on demand, avoiding a required service manager.
 func ensureDaemon(ctx context.Context, sock string) error {
 	if dialSock(ctx, sock) {
 		return nil
@@ -315,10 +311,10 @@ func ensureDaemon(ctx context.Context, sock string) error {
 	if err != nil {
 		return err
 	}
-	// Deliberately not CommandContext. The daemon has to outlive the command
-	// that started it, and binding it to this context would kill it on exit.
+	// Do not bind the daemon to the caller's context, it must survive this
+	// command.
 	//
-	//nolint:gosec,noctx // self is os.Executable, and the daemon must outlive us.
+	//nolint:gosec,noctx // self is os.Executable, the child intentionally outlives ctx.
 	cmd := exec.Command(self, "daemon")
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
